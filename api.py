@@ -42,7 +42,7 @@ OUTPUT_DIR = "generated"
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
 # ── Import engine components ──
-from core.engine_v3 import (
+from engine_v3 import (
     extract_wavetable, save_wavetable_wav,
     extract_envelope, analyze_spectral_envelope,
     detect_effects, classify_sound,
