@@ -148,6 +148,22 @@ def health():
         "max_iterations": MAX_ITERATIONS,
         "template_exists": os.path.exists(TEMPLATE_PATH),
     }
+    @app.get("/api/test-claude")
+def test_claude():
+    api_key = os.environ.get("ANTHROPIC_API_KEY")
+    if not api_key:
+        return {"error": "No API key"}
+    try:
+        import anthropic
+        client = anthropic.Anthropic(api_key=api_key)
+        msg = client.messages.create(
+            model="claude-sonnet-4-5",
+            max_tokens=50,
+            messages=[{"role": "user", "content": "Say hello in 3 words"}]
+        )
+        return {"status": "ok", "response": msg.content[0].text}
+    except Exception as e:
+        return {"error": str(e)[:500], "type": type(e).__name__}
 
 
 @app.post("/api/analyze")
