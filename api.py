@@ -268,8 +268,8 @@ async def analyze(file: UploadFile = File(...), sound_type: str = Form("lead")):
             engine_used = "rules-fallback"
         
         if os.path.exists(TEMPLATE_PATH):
-            from ai_engine import build_preset_from_claude_params
-            preset_bytes, preset_name = build_preset_from_claude_params(best_params, TEMPLATE_PATH)
+            from preset_builder import build_preset_from_params
+            preset_bytes, preset_name = build_preset_from_params(best_params, TEMPLATE_PATH)
         else:
             raise HTTPException(status_code=500, detail="No template found")
         
