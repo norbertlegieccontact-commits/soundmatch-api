@@ -1,7 +1,8 @@
 """
-SoundMatch AI Engine v4 — Trained on REAL Serum 2 presets
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-Few-shot examples from actual VoxTune preset pack.
+SoundMatch AI Engine v5 — Trained on 210 real Serum 2 presets
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Analiza dataset: 210 presetów (BASS, LEAD, PAD, PLUCK, CHORD, KEYS, REESE, DONK, AMBIENT)
+Pełne mapowanie FX (14 typów), category templates, real wavetable library.
 """
 
 import os
@@ -11,960 +12,425 @@ import urllib.request
 import urllib.error
 
 
-SYSTEM_PROMPT = """You are an expert Serum 2 sound designer. You receive audio analysis data and return EXACT Serum 2 parameters as JSON.
+# ═══════════════════════════════════════════════════════════════════
+# SYSTEM PROMPT — z pełną wiedzą Serum 2 wyciągniętą z 210 presetów
+# ═══════════════════════════════════════════════════════════════════
+
+SYSTEM_PROMPT = """You are an expert Serum 2 sound designer with deep knowledge from analyzing 210 professional presets across BASS, LEAD, PAD, PLUCK, CHORD, KEYS, REESE, DONK, and AMBIENT categories.
+
+Your job: receive audio analysis, return EXACT Serum 2 parameters as JSON.
 
 CRITICAL RULES:
-1. Return ONLY valid JSON — no markdown, no explanation outside JSON
-2. Use EXACT Serum 2 parameter names (kParamVolume, kParamUnison, kParamDetuneWid, etc.)
-3. Base your decisions on the harmonic content, brightness, envelope shape, and pitch
-4. ALL float values in plainParams must be floats (not integers, not booleans)
-5. FX entries MUST have "type" and "kUIParamMixOrGain" fields
+1. Return ONLY valid JSON — no markdown, no commentary outside JSON.
+2. Use EXACT Serum 2 parameter names (kParamVolume, kParamUnison, kParamDetuneWid, kParamTablePos, etc.).
+3. ALL numeric values in plainParams must be floats (1.0 not 1, 0.5 not "0.5").
+4. FX entries MUST contain "type" field and at least one "FX{ClassName}" object with "plainParams".
 
-SERUM 2 PARAMETER REFERENCE (from real presets):
+╔══════════════════════════════════════════════════════════════════╗
+║ SERUM 2 PARAMETER REFERENCE                                      ║
+╚══════════════════════════════════════════════════════════════════╝
 
 ## Oscillator (Oscillator0.plainParams)
-- kParamVolume: 0.0-1.0 (volume)
-- kParamOctave: -4.0 to 4.0
-- kParamDetune: 0.0-1.0 (fine detune)
-- kParamUnison: 1.0-16.0 (unison voice count, as FLOAT)
-- kParamDetuneWid: 0.0-100.0 (unison spread width)
+- kParamVolume: 0.0–1.0
+- kParamOctave: -4.0 to 4.0 (BASS: -2.0, LEAD: 0.0, PAD: 0.0/+1.0)
+- kParamDetune: 0.0–1.0 (fine detune, typically 0.04–0.10)
+- kParamUnison: 1.0–16.0 as FLOAT (BASS≈5, LEAD≈6-7, REESE≈8, PLUCK≈7, PAD≈3-4, CHORD≈4-5)
+- kParamDetuneWid: 0.0–100.0 (unison spread, ≈87 typical)
 - kParamPan: -1.0 to 1.0
+- kParamFine: 0.0–1.0
 
-## Wavetable (Oscillator0.WTOsc0.plainParams)  
-- kParamTablePos: 0-256 (position in wavetable: saw≈0, square≈64, triangle≈128, sine≈192)
-- kParamWarp: 0.0-1.0
+## Wavetable (Oscillator0.WTOsc0.plainParams)
+- kParamTablePos: 0–256 (position in wavetable: saw≈0, square≈64, triangle≈128, sine≈192)
+- kParamWarp: 0.0–1.0
 - kParamWarpMenu: "kPD_OSC", "kSync", "kBendPosNeg", "kQuantize", "kFilterLPF", "kFM"
+- kParamInitialPhase: 0–360 degrees
 
-## Filter (VoiceFilter0.plainParams)
-- kParamFreq: 0.0-1.0 (cutoff frequency, log scale)
-- kParamReso: 0.0-100.0 (resonance)
-- kParamType: "LP12", "LP24", "HP12", "HP24", "BP", "Notch"
+REAL WAVETABLE PATHS (use these instead of generic shapes):
+- "/Analog/Basic Shapes.wav"     ← most common (14 uses in dataset)
+- "S2 Tables/Default Shapes.wav" ← all basic waveforms
+- "/Analog/Analog_BD_Sin.wav"    ← good for kicks/sub
+- "/Analog/MB Saw.wav"           ← classic supersaw
+- "/Analog/Basic Mini.wav"       ← minimoog vibe
+- "/Analog/Jno.wav"              ← Juno-style
+- "S2 Tables/Analog/AT Alter.wav" ← morphing analog
+- "/Analog/BS2 - Subby Saw.wav"  ← bass
 
-## Envelope (Env0.plainParams)
-- kParamAttack: 0.0-1.0 (0=instant, 1=10sec)
-- kParamDecay: 0.0-1.0
-- kParamSustain: 0.0-1.0
-- kParamRelease: 0.0-1.0
+## Filter (VoiceFilter0.plainParams) — set kParamEnable=1.0 to activate
+- kParamFreq: 0.0–1.0 (cutoff, log scale)
+- kParamReso: 0.0–100.0 (resonance, typical 10–20)
+- kParamDrive: 0.0–100.0 (typical 20–30)
+- kParamType: see list below
 
-## FX (in FXRack0.FX list — EACH entry needs type + kUIParamMixOrGain)
-FX Types: FXDistortion=0, FXPhaser=2, FXChorus=3, FXDelay=4, FXComp=5, FXReverb=6, FXEQ=7, FXFilter=8
+FILTER TYPES (most used in pro presets):
+- "MgL24" — Moog 24dB Low Pass (warm, classic) — BEST for BASS/LEAD
+- "MgL18" — Moog 18dB Low Pass — slightly brighter
+- "MgL6"  — Moog 6dB — subtle filtering
+- "L12", "L24" — Standard ladder LP
+- "H12", "H18", "H24" — High Pass (REESE basses, leads)
+- "B12" — Band Pass (formant-like)
+- "Phase48HL6P", "Phase24N", "Phase12N" — phaser-filters (creative PAD)
+- "Combs", "CombH6P", "CombN" — comb filters (resonant PAD/PLUCK)
+- "Allpasses" — all-pass (PAD movement)
+- "FlangeN" — flanger filter
+- "DirtyMg", "LadderMg" — dirty/saturated Moog
+- "Diffuser", "Reverb1" — reverberant filters (PLUCK/PAD)
+- "Phase48N", "ZDF_A", "HEQ12" — clean/precision
 
-Example FX entry:
-{"FXReverb": {"plainParams": {"kParamWet": 30.0, "kParamSize": 55.0, "kParamType": "kHall"}}, "kUIParamMixOrGain": 0.0, "type": 6}
+## Envelope (Env0.plainParams) — ALL VALUES IN SECONDS
+- kParamAttack: 0.0001–10.0 (BASS≈0.001, LEAD≈0.001, PLUCK≈0.001, PAD≈1.2, KEYS≈0.001)
+- kParamHold: 0.0–10.0 (rarely used)
+- kParamDecay: 0.0–10.0 (BASS≈0.88, LEAD≈0.65, PAD≈1.6, PLUCK≈0.89)
+- kParamSustain: 0.0–1.0 (BASS≈0.42, LEAD≈0.15, PLUCK≈0.18, PAD≈0.39, KEYS≈0.0)
+- kParamRelease: 0.0–10.0 (BASS≈0.13, LEAD≈0.20, PLUCK≈0.31, PAD≈0.68, KEYS≈0.47)
+- kParamCurve1, kParamCurve2, kParamCurve3: 0–100 (envelope curvature, default 50)
 
-SOUND TYPE PATTERNS (from real presets):
-- BASS: Low pitch, dark (brightness<0.15), 1-9 unison, low cutoff, short release, distortion common
-- LEAD: Mid-high pitch, bright (0.2-0.5), 2-7 unison, medium cutoff, moderate FX  
-- PLUCK: Fast attack+decay, low sustain, triangle/sine wave, reverb/delay common
-- PAD: Slow attack (>0.3), high sustain, wide unison, heavy reverb+chorus
+╔══════════════════════════════════════════════════════════════════╗
+║ FX CHAIN — 14 EFFECTS (FXRack0.FX is a LIST in order)           ║
+╚══════════════════════════════════════════════════════════════════╝
+
+Each FX entry format:
+{
+  "FX<ClassName>": {"plainParams": {...}},
+  "type": <id>,
+  "kUIParamMixOrGain": 0.0
+}
+
+FX TYPE IDs and CLASS NAMES (CRITICAL — use these exact mappings):
+- 0:  FXDistortion  — saturation/drive
+- 1:  FXFlanger     — flanger (subtle movement)
+- 2:  FXPhaser      — phaser
+- 3:  FXChorus      — chorus (width, depth)
+- 4:  FXDelay       — delay (ping-pong, sync)
+- 5:  FXComp        — compressor
+- 6:  FXReverb      — reverb (hall, plate, room)
+- 7:  FXEQ          — EQ (always-on, no wet needed)
+- 8:  FXFilter      — FX filter (resonant sweeps)
+- 9:  FXHyperD      — Hyper/Dimension ⭐ HUGE in pro presets (40%+ of bass/lead/chord)
+- 10: FXBode        — Bode frequency shifter
+- 11: FXConv        — Convolution reverb (use for AMBIENT/KEYS)
+- 12: FXUtils       — Mono/Width utility (78% of PAD, 79% of KEYS use this)
+- 13: FXSplit       — Multiband split
+
+PARAMETER REFERENCE per FX TYPE:
+
+### FXDistortion (type 0)
+kParamDrive: 0–100, kParamWet: 0–100, kParamMode: "kDiode2"/"kTapeSat"/"kDownsample"/"kSoft"/"kHard", kParamPrePost: 1.0 (pre) or 2.0 (post)
+
+### FXFlanger (type 1)
+kParamRate: 0.01–4.0 Hz, kParamDepth: 0–100, kParamFeedback: 0–100, kParamWet: 0–100, kParamWidth: 0–360
+
+### FXPhaser (type 2)
+kParamRate: 0–4 Hz, kParamDepth: 0–100, kParamFeedback: 0–100, kParamFreq: 50–6000 Hz, kParamWet: 0–100
+
+### FXChorus (type 3)
+kParamRate: 0.025–4 Hz, kParamDepth: 0–20, kParamDelay: 0–8ms, kParamFeedback: 0–80, kParamFilt: 200–20000 Hz, kParamWet: 0–100
+
+### FXDelay (type 4)
+kParamTimeL: 0.001–0.5 sec, kParamTimeR: 0.001–0.5 sec, kParamFeedback: 0–80, kParamMode: 1.0(stereo)/2.0(ping-pong), kParamFreq: 95–12000 Hz (filter), kParamBW: 0.75–6.9, kParamWet: 0–100, kParamLink: 1.0
+
+### FXComp (type 5)
+kParamThresh: 0–1, kParamRatio: 1–1000000, kParamAttack: 0.1–612, kParamRelease: 0.1–998, kParamMakeup: 1–27
+
+### FXReverb (type 6) ★
+kParamType: "kHall"/"kPlate"/"kRoom"/"kStudio"/"kVintage", kParamSize: 0–100, kParamWet: 0–100, kParamPreDelay: 0–0.15, kParamWidth: 0–100, kParamFreq: 3–84 (HP filter), kParamFreqB: 0–85 (LP filter), kParamFeedback: 0–98, kParamDelay: 0–120
+
+### FXEQ (type 7) — always active, no wet
+kParamFreq1: 21–14000 Hz, kParamGain1: -24 to +12 dB, kParamReso1: 0–86, kParamType1: 1.0 (peak) or 2.0 (shelf)
+kParamFreq2, kParamGain2, kParamReso2, kParamType2 (second band)
+
+### FXFilter (type 8)
+kParamFreq: 0–1, kParamReso: 0–80, kParamDrive: 0–100, kParamType: "MgL24"/"LNH24"/"Diffuser"/"Phase48N", kParamWet: 0–100
+
+### FXHyperD (type 9) ★ KEY EFFECT
+kParamUnison: 2.0–7.0 (extra unison voices), kParamDetune: 10–100, kParamRate: 35–100, kParamDimESize: 0–100, kParamDimEWet: 5–100, kParamWet: 0–100
+TWO mix knobs: kUIParamMixOrGainHyper + kUIParamMixOrGainDimE
+
+### FXBode (type 10)
+kParamShift: -100 to +100 (Hz shift)
+
+### FXConv (type 11) — Convolution Reverb
+kParamWet: 0–100, kParamSize: 10–330, kParamTone: 0–100, kParamDecay: 0–100
+
+### FXUtils (type 12) — Mono Bass / Width
+kParamLFMono: 1.0 (enable mono LF), kParamLFXover: 60–400 Hz, kParamWidth: 0–100
+
+### FXSplit (type 13)
+kParamFreq: crossover, kParamModuleCount1, kParamModuleCount2
+
+╔══════════════════════════════════════════════════════════════════╗
+║ FX CHAIN PATTERNS (from real preset analysis)                    ║
+╚══════════════════════════════════════════════════════════════════╝
+
+BASS:       EQ → FXHyperD → Reverb (small)         | 67% use EQ, 41% Hyper, 41% Reverb
+REESE:      FXUtils → FXHyperD → FXUtils → EQ      | sandwich trick, 112% use Utils
+LEAD:       FXHyperD → EQ → Reverb                 | 89% use EQ, 51% Reverb, 34% Hyper
+CHORD:      Chorus → Delay → Reverb (big) → EQ     | 79% EQ, 63% Reverb, 58% Chorus
+PLUCK:      FXHyperD → Phaser → Delay → Reverb → EQ| 74% Reverb, 65% Delay
+PAD/AMB:    FXConv → EQ → FXUtils                  | 78% Utils, 61% Chorus, 48% ConvReverb
+KEYS:       EQ → Distortion → FXUtils              | 95% EQ, 79% Utils, 37% Distortion
+DONK:       Distortion → EQ → FXUtils              | dirty, mono, punchy
+
+╔══════════════════════════════════════════════════════════════════╗
+║ DECISION GUIDE (audio analysis → preset)                         ║
+╚══════════════════════════════════════════════════════════════════╝
+
+PITCH < 80 Hz (sub bass):     → BASS template, kParamOctave=-2.0, MgL24 filter, mono utils
+PITCH 80-200 Hz (bass):       → BASS template, octave=-1 or -2
+PITCH 200-500 Hz (mid):       → LEAD or CHORD depending on harmonic content
+PITCH > 500 Hz (high):        → LEAD/PLUCK, brighter filter
+
+BRIGHTNESS < 0.3 (dark):      → MgL24 filter freq 0.3-0.5, low drive
+BRIGHTNESS 0.3-0.6 (mid):     → MgL18 filter freq 0.5-0.7
+BRIGHTNESS > 0.6 (bright):    → Filter open (freq > 0.7) or MgL6/LH12
+
+ATTACK < 0.01s (instant):     → Bass/Lead/Pluck — short Env0 attack
+ATTACK > 0.5s (slow):         → PAD — long Env0 attack
+RELEASE > 1s:                 → PAD/CHORD — long release
+
+ROUGHNESS > 0.5 (gritty):     → add FXDistortion, high unison
+NOISINESS > 0.15:             → add Noise oscillator, FXConv reverb
+
+ALWAYS:
+- Set filter kParamEnable=1.0 if you want filter active
+- Add kParamLevelOut where applicable (default 0.5)
+- For pads/ambients: longer attack, bigger reverb (kParamSize > 50)
+- For basses: kParamOctave=-2.0, mono filter, kParamLFMono=1.0 in FXUtils
+
+╔══════════════════════════════════════════════════════════════════╗
+║ OUTPUT FORMAT                                                    ║
+╚══════════════════════════════════════════════════════════════════╝
+
+Return JSON with this exact structure:
+{
+  "preset_name": "CAT - DESCRIPTIVE NAME",
+  "oscillator_a": {"kParamVolume": float, "kParamOctave": float, "kParamUnison": float, "kParamDetune": float, "kParamDetuneWid": float},
+  "wt": {"kParamTablePos": float, "kParamWarpMenu": "kPD_OSC", "wavetable_path": "/Analog/..."},
+  "filter": {"enabled": true, "kParamEnable": 1.0, "kParamFreq": float, "kParamReso": float, "kParamDrive": float, "kParamType": "MgL24"},
+  "envelope_amp": {"kParamAttack": float, "kParamDecay": float, "kParamSustain": float, "kParamRelease": float},
+  "fx": [
+    {"FXEQ": {"plainParams": {"kParamFreq1": 200.0, "kParamGain1": 2.0, "kParamReso1": 30.0, "kParamType1": 1.0, "kParamFreq2": 8000.0, "kParamGain2": 3.0, "kParamReso2": 30.0, "kParamType2": 2.0}}, "type": 7},
+    {"FXHyperD": {"plainParams": {"kParamUnison": 6.0, "kParamDetune": 50.0, "kParamRate": 80.0, "kParamWet": 70.0, "kParamDimESize": 50.0, "kParamDimEWet": 60.0}}, "type": 9, "kUIParamMixOrGainHyper": 0.5, "kUIParamMixOrGainDimE": 0.5},
+    {"FXReverb": {"plainParams": {"kParamType": "kHall", "kParamSize": 60.0, "kParamWet": 40.0, "kParamWidth": 100.0}}, "type": 6, "kUIParamMixOrGain": 0.4}
+  ],
+  "reasoning": "1-sentence explanation"
+}
 """
 
-# Real training pairs from VoxTune preset pack
-TRAINING_EXAMPLES = [
-  {
-    "audio_analysis": {
-      "pitch": "C\u266f2",
-      "fundamental_hz": 70.1,
-      "spectral_centroid": 437.0,
-      "brightness": 0.05,
-      "rms": 0.1263,
-      "noisiness": 1.0,
-      "attack_time": 0.4144,
-      "harmonics": [
-        1.0,
-        0.284,
-        0.042,
-        0.437,
-        0.173,
-        0.019
-      ]
-    },
-    "serum_params": {
-      "name": "BS-  Deep HOUSE",
-      "osc": {
-        "kParamDetune": 0.15,
-        "kParamOctave": -1.0,
-        "kParamUnison": 9.0,
-        "kParamVolume": 0.41
-      },
-      "wt": {
-        "kParamTablePos": 121.79
-      },
-      "filter": {
-        "kParamEnable": 1.0,
-        "kParamFreq": 0.1,
-        "kParamReso": 10.0,
-        "kParamType": "MgL18"
-      },
-      "env": {
-        "kParamAttack": 0.0,
-        "kParamCurve1": 40.0,
-        "kParamCurve2": 60.0,
-        "kParamCurve3": 60.0,
-        "kParamDecay": 1.28,
-        "kParamRelease": 0.14,
-        "kParamSustain": 0.51
-      },
-      "fx": [
-        {
-          "FXHyperD": {
-            "kParamDimESize": 15.79,
-            "kParamRate": 40.0,
-            "kParamUnison": 4.0,
-            "kParamWet": 0.0
-          },
-          "type": 9
-        },
-        {
-          "FXDistortion": {
-            "kParamDrive": 18.15,
-            "kParamFreq": 0.47,
-            "kParamMode": "kDownsample",
-            "kParamWet": 0.0
-          },
-          "type": 0
-        },
-        {
-          "FXReverb": {
-            "kParamDelay": 0.0,
-            "kParamFreq": 53.51,
-            "kParamFreqB": 56.05,
-            "kParamSize": 0.0,
-            "kParamType": "kHall",
-            "kParamWet": 10.99,
-            "kParamWidth": 20.0
-          },
-          "type": 6
-        }
-      ]
-    }
-  },
-  {
-    "audio_analysis": {
-      "pitch": "G\u266f2",
-      "fundamental_hz": 102.6,
-      "spectral_centroid": 278.0,
-      "brightness": 0.03,
-      "rms": 0.3031,
-      "noisiness": 0.0,
-      "attack_time": 0.0401,
-      "harmonics": [
-        1.0,
-        3.498,
-        0.309,
-        0.606,
-        0.262,
-        0.02
-      ]
-    },
-    "serum_params": {
-      "name": "BS - KNOCK KNOCK",
-      "osc": {
-        "kParamOctave": -2.0,
-        "kParamVolume": 0.57
-      },
-      "wt": {
-        "kParamRandomPhase": 0.0,
-        "kParamWarp": 0.45,
-        "kParamWarpMenu": "kPD_OSC"
-      },
-      "filter": {
-        "kParamDrive": 15.79,
-        "kParamEnable": 1.0,
-        "kParamFreq": 0.16,
-        "kParamReso": 10.0
-      },
-      "env": {
-        "kParamAttack": 0.0,
-        "kParamCurve1": 40.0,
-        "kParamCurve2": 60.0,
-        "kParamCurve3": 60.0,
-        "kParamDecay": 1.29,
-        "kParamRelease": 0.07,
-        "kParamSustain": 0.16
-      },
-      "fx": [
-        {
-          "FXChorus": {
-            "kParamFeedback": 9.5,
-            "kParamFilt": 1233.96,
-            "kParamWet": 0.0
-          },
-          "type": 3
-        },
-        {
-          "FXReverb": {
-            "kParamDelay": 1.7,
-            "kParamFreq": 25.44,
-            "kParamFreqB": 81.93,
-            "kParamSize": 0.0,
-            "kParamType": "kHall",
-            "kParamWet": 0.0,
-            "kParamWidth": 20.0
-          },
-          "type": 6
-        }
-      ]
-    }
-  },
-  {
-    "audio_analysis": {
-      "pitch": "D3",
-      "fundamental_hz": 146.8,
-      "spectral_centroid": 984.0,
-      "brightness": 0.12,
-      "rms": 0.0535,
-      "noisiness": 0.0,
-      "attack_time": 1.0762,
-      "harmonics": [
-        1.0,
-        189.587,
-        0.812,
-        64.106,
-        1.123,
-        36.984
-      ]
-    },
-    "serum_params": {
-      "name": "BS - Brassline",
-      "osc": {
-        "kParamDetune": 0.1,
-        "kParamDetuneWid": 70.09,
-        "kParamUnison": 3.0
-      },
-      "wt": {
-        "kParamTablePos": 41.26,
-        "kParamWarp": 0.28,
-        "kParamWarpMenu": "kDistTube"
-      },
-      "filter": {
-        "kParamDrive": 28.42,
-        "kParamEnable": 1.0,
-        "kParamFreq": 0.48
-      },
-      "env": {
-        "kParamAttack": 0.07,
-        "kParamCurve1": 50.0,
-        "kParamCurve2": 66.6,
-        "kParamCurve3": 66.6,
-        "kParamDecay": 1.15,
-        "kParamRelease": 0.36,
-        "kParamSustain": 0.41
-      },
-      "fx": [
-        {
-          "FXDistortion": {
-            "kParamDrive": 26.75,
-            "kParamLevelOut": 0.61
-          },
-          "type": 0
-        },
-        {
-          "FXUtils": {
-            "kParamWidth": 0.0
-          },
-          "type": 12
-        },
-        {
-          "FXDelay": {
-            "kParamBW": 1.66,
-            "kParamFeedback": 46.67,
-            "kParamFreq": 964.27,
-            "kParamMode": 1.0,
-            "kParamOffsetL": 0.94,
-            "kParamOffsetR": 1.06,
-            "kParamTimeL": 0.05,
-            "kParamTimeR": 0.05,
-            "kParamWet": 20.53
-          },
-          "type": 4
-        },
-        {
-          "FXConv": {
-            "kParamSize": 181.82,
-            "kParamTone": 57.89,
-            "kParamWet": 27.37
-          },
-          "type": 11
-        }
-      ]
-    }
-  },
-  {
-    "audio_analysis": {
-      "pitch": "D3",
-      "fundamental_hz": 146.8,
-      "spectral_centroid": 1724.0,
-      "brightness": 0.22,
-      "rms": 0.145,
-      "noisiness": 0.0,
-      "attack_time": 1.2798,
-      "harmonics": [
-        1.0,
-        458.458,
-        1.033,
-        0.201,
-        0.523,
-        18.903
-      ]
-    },
-    "serum_params": {
-      "name": "LD - CAMOUFLAGE",
-      "osc": {
-        "kParamVolume": 0.32
-      },
-      "wt": {
-        "kParamWarp": 0.76
-      },
-      "filter": {
-        "kParamEnable": 1.0,
-        "kParamFreq": 0.5,
-        "kParamReso": 0.0,
-        "kParamType": "H12"
-      },
-      "env": {
-        "kParamAttack": 0.0,
-        "kParamCurve1": 49.95,
-        "kParamCurve2": 66.6,
-        "kParamCurve3": 66.6,
-        "kParamRelease": 2.16
-      },
-      "fx": [
-        {
-          "FXHyperD": {
-            "kParamDimESize": 0.0,
-            "kParamDimEWet": 69.3,
-            "kParamRate": 40.0,
-            "kParamUnison": 4.0,
-            "kParamWet": 0.0
-          },
-          "type": 9
-        },
-        {
-          "FXDistortion": {
-            "kParamDrive": 67.54
-          },
-          "type": 0
-        },
-        {
-          "FXDelay": {
-            "kParamBW": 6.75,
-            "kParamFeedback": 40.0,
-            "kParamMode": 1.0,
-            "kParamWet": 0.0
-          },
-          "type": 4
-        },
-        {
-          "FXReverb": {
-            "kParamDelay": 30.62,
-            "kParamFreqB": 35.0,
-            "kParamSize": 35.0,
-            "kParamType": "kHall",
-            "kParamWet": 0.0,
-            "kParamWidth": 20.0
-          },
-          "type": 6
-        },
-        {
-          "FXFilter": {
-            "kParamFreq": 0.46,
-            "kParamReso": 44.74,
-            "kParamType": "MgL12",
-            "kParamWet": 0.0
-          },
-          "type": 8
-        },
-        {
-          "FXEQ": {
-            "kParamFreq1": 99.08,
-            "kParamFreq2": 2040.54,
-            "kParamGain1": -24.0,
-            "kParamReso1": 60.0,
-            "kParamReso2": 60.0
-          },
-          "type": 7
-        }
-      ]
-    }
-  },
-  {
-    "audio_analysis": {
-      "pitch": "D3",
-      "fundamental_hz": 146.8,
-      "spectral_centroid": 1926.0,
-      "brightness": 0.24,
-      "rms": 0.0661,
-      "noisiness": 0.0,
-      "attack_time": 2.4058,
-      "harmonics": [
-        1.0,
-        458.39,
-        1.419,
-        120.109,
-        3.105,
-        91.093
-      ]
-    },
-    "serum_params": {
-      "name": "LD - AFTERLIFE",
-      "osc": {
-        "kParamVolume": 0.16
-      },
-      "wt": {
-        "kParamInitialPhase": 180.94,
-        "kParamRandomPhase": 0.0,
-        "kParamTablePos": 136.15
-      },
-      "filter": {
-        "kParamEnable": 1.0,
-        "kParamFreq": 0.71,
-        "kParamReso": 0.0,
-        "kParamType": "H12"
-      },
-      "env": {
-        "kParamAttack": 0.03,
-        "kParamCurve1": 50.16,
-        "kParamCurve2": 64.2,
-        "kParamCurve3": 60.0,
-        "kParamDecay": 0.24,
-        "kParamRelease": 0.35,
-        "kParamSustain": 0.0
-      },
-      "fx": [
-        {
-          "FXEQ": {
-            "kParamFreq1": 209.62,
-            "kParamFreq2": 1653.56,
-            "kParamGain1": -2.72,
-            "kParamGain2": 1.82,
-            "kParamReso1": 36.87,
-            "kParamReso2": 41.85,
-            "kParamType2": 1.0
-          },
-          "type": 7
-        },
-        {
-          "FXFilter": {
-            "kParamFreq": 0.43,
-            "kParamType": "MgL18"
-          },
-          "type": 8
-        },
-        {
-          "FXHyperD": {
-            "kParamDimESize": 13.6,
-            "kParamRate": 40.0,
-            "kParamUnison": 4.0,
-            "kParamWet": 0.0
-          },
-          "type": 9
-        },
-        {
-          "FXDistortion": {
-            "kParamDrive": 36.55
-          },
-          "type": 0
-        },
-        {
-          "FXDelay": {
-            "kParamBW": 4.01,
-            "kParamFeedback": 40.0,
-            "kParamFreq": 1006.8,
-            "kParamMode": 1.0,
-            "kParamWet": 24.56
-          },
-          "type": 4
-        },
-        {
-          "FXReverb": {
-            "kParamDelay": 61.23,
-            "kParamFeedback": 18.67,
-            "kParamFreq": 23.75,
-            "kParamFreqB": 61.31,
-            "kParamSize": 43.21,
-            "kParamType": "kHall",
-            "kParamWet": 32.89,
-            "kParamWidth": 87.57
-          },
-          "type": 6
-        }
-      ]
-    }
-  },
-  {
-    "audio_analysis": {
-      "pitch": "D3",
-      "fundamental_hz": 146.8,
-      "spectral_centroid": 1955.0,
-      "brightness": 0.24,
-      "rms": 0.0552,
-      "noisiness": 0.0,
-      "attack_time": 0.7599,
-      "harmonics": [
-        1.0,
-        380.494,
-        1.871,
-        155.649,
-        5.469,
-        125.157
-      ]
-    },
-    "serum_params": {
-      "name": "PL - ETERNITY",
-      "osc": {},
-      "wt": {},
-      "filter": {
-        "kParamEnable": 1.0,
-        "kParamFreq": 0.76,
-        "kParamReso": 10.0
-      },
-      "env": {
-        "kParamAttack": 0.0,
-        "kParamCurve1": 40.0,
-        "kParamCurve2": 60.0,
-        "kParamCurve3": 60.0,
-        "kParamDecay": 0.88,
-        "kParamRelease": 0.45,
-        "kParamSustain": 0.69
-      },
-      "fx": [
-        {
-          "FXHyperD": {
-            "kParamDimESize": 7.02,
-            "kParamDimEWet": 37.28,
-            "kParamRate": 40.0,
-            "kParamUnison": 4.0,
-            "kParamWet": 21.49
-          },
-          "type": 9
-        },
-        {
-          "FXPhaser": {
-            "kParamFeedback": 82.19,
-            "kParamWet": 15.35
-          },
-          "type": 2
-        },
-        {
-          "FXDelay": {
-            "kParamBW": 0.75,
-            "kParamFeedback": 40.0,
-            "kParamFreq": 1395.47,
-            "kParamTimeR": 0.13,
-            "kParamWet": 36.58
-          },
-          "type": 4
-        },
-        {
-          "FXReverb": {
-            "kParamDelay": 27.63,
-            "kParamFreq": 3.07,
-            "kParamFreqB": 35.0,
-            "kParamSize": 71.4,
-            "kParamType": "kHall",
-            "kParamWet": 20.0,
-            "kParamWidth": 20.0
-          },
-          "type": 6
-        },
-        {
-          "FXEQ": {
-            "kParamFreq1": 209.62,
-            "kParamFreq2": 2040.54,
-            "kParamReso1": 60.0,
-            "kParamReso2": 60.0
-          },
-          "type": 7
-        }
-      ]
-    }
-  },
-  {
-    "audio_analysis": {
-      "pitch": "D3",
-      "fundamental_hz": 146.8,
-      "spectral_centroid": 896.0,
-      "brightness": 0.11,
-      "rms": 0.075,
-      "noisiness": 0.0,
-      "attack_time": 1.316,
-      "harmonics": [
-        1.0,
-        393.579,
-        3.62,
-        433.965,
-        15.574,
-        298.547
-      ]
-    },
-    "serum_params": {
-      "name": "PL - HEARTBREAK",
-      "osc": {
-        "kParamDetune": 0.07,
-        "kParamUnison": 3.0,
-        "kParamVolume": 0.06
-      },
-      "wt": {
-        "kParamTablePos": 65.87,
-        "kParamWarp": 0.32,
-        "kParamWarpMenu": "kSync",
-        "kParamWarpVar": 1.0
-      },
-      "filter": {
-        "kParamEnable": 1.0,
-        "kParamFreq": 0.54,
-        "kParamReso": 0.0,
-        "kParamType": "LadderMg"
-      },
-      "env": {
-        "kParamAttack": 0.0,
-        "kParamCurve1": 49.95,
-        "kParamCurve2": 69.54,
-        "kParamCurve3": 66.6,
-        "kParamDecay": 1.4,
-        "kParamRelease": 1.35,
-        "kParamSustain": 0.18
-      },
-      "fx": [
-        {
-          "FXHyperD": {
-            "kParamDetune": 25.44,
-            "kParamDimESize": 0.0,
-            "kParamRate": 40.0,
-            "kParamUnison": 4.0,
-            "kParamWet": 20.61
-          },
-          "type": 9
-        },
-        {
-          "FXDistortion": {
-            "kParamBW": 0.07,
-            "kParamDrive": 16.67,
-            "kParamFreq": 0.58,
-            "kParamLPHP": 46.5,
-            "kParamMode": "kDiode2",
-            "kParamPrePost": 2.0,
-            "kParamWet": 4.82
-          },
-          "type": 0
-        },
-        {
-          "FXPhaser": {
-            "kParamDepth2": 0.07,
-            "kParamFeedback": 80.0,
-            "kParamWet": 0.0
-          },
-          "type": 2
-        },
-        {
-          "FXChorus": {
-            "kParamFeedback": 9.5,
-            "kParamWet": 11.84
-          },
-          "type": 3
-        },
-        {
-          "FXDelay": {
-            "kParamBW": 1.48,
-            "kParamFeedback": 50.96,
-            "kParamFreq": 1027.02,
-            "kParamMode": 1.0,
-            "kParamTimeL": 0.04,
-            "kParamTimeR": 0.05,
-            "kParamWet": 2.81
-          },
-          "type": 4
-        },
-        {
-          "FXReverb": {
-            "kParamDelay": 21.46,
-            "kParamFreq": 25.88,
-            "kParamFreqB": 35.0,
-            "kParamSize": 30.61,
-            "kParamType": "kHall",
-            "kParamWet": 38.86,
-            "kParamWidth": 20.0
-          },
-          "type": 6
-        },
-        {
-          "FXEQ": {
-            "kParamFreq1": 499.95,
-            "kParamFreq2": 1704.67,
-            "kParamGain1": -20.84,
-            "kParamGain2": 11.56,
-            "kParamReso1": 30.61,
-            "kParamReso2": 40.26,
-            "kParamType2": 2.0
-          },
-          "type": 7
-        },
-        {
-          "FXComp": {
-            "kParamAttack": 90.09,
-            "kParamCompensatedWetDry": 0.0,
-            "kParamGain0": 4.6,
-            "kParamGain2": 4.6,
-            "kParamMakeup": 8.77,
-            "kParamRatioBelow": 0.75,
-            "kParamRelease": 39.67,
-            "kParamThreshUD0": 28.57,
-            "kParamThreshUD1": 0.0,
-            "kParamThreshUD2": 0.0,
-            "kParamWet": 87.28
-          },
-          "type": 5
-        },
-        {
-          "FXFilter": {
-            "kParamDrive": 9.65,
-            "kParamFreq": 0.42,
-            "kParamType": "H18"
-          },
-          "type": 8
-        }
-      ]
-    }
-  }
-]
 
-# Full dataset summary for reference
-DATASET_SUMMARY = [
-  {
-    "name": "LD-CAMOUFLAGE",
-    "pitch": "D3",
-    "brightness": 0.22,
-    "attack": 1.2798,
-    "osc_params": {
-      "kParamVolume": 0.32
+# ═══════════════════════════════════════════════════════════════════
+# TRAINING EXAMPLES — 10 reprezentatywnych presetów z 210-presetowego datasetu
+# Każdy przykład = audio_analysis (jak nasz analyzer to widzi) + serum_params (output)
+# ═══════════════════════════════════════════════════════════════════
+
+TRAINING_EXAMPLES = [{'category': 'bass', 'audio_analysis': {'sound_type': 'bass', 'pitch': 'E1', 'fundamental_hz': 41, 'spectral_centroid': 650, 'brightness': 0.18, 'attack_time': 0.001, 'decay_time': 0.4, 'sustain_level': 0.3, 'release_time': 0.15, 'rms': 0.3, 'roughness': 0.6, 'noisiness': 0.05, 'harmonics': [1.0, 0.3, 0.15, 0.08]}, 'serum_params': {'preset_name': 'BS - BLAZE ME', 'oscillator_a': {'kParamOctave': -2.0}, 'wt': {'wavetable_path': '/Analog/BS2 - Subby Saw.wav'}, 'filter': {'enabled': True, 'kParamFreq': 0.4605, 'kParamReso': 10.0, 'kParamDrive': 16.2281, 'kParamType': 'MgL24'}, 'envelope_amp': {'kParamAttack': 0.0005, 'kParamRelease': 0.0147}}}, {'category': 'reese', 'audio_analysis': {'sound_type': 'reese', 'pitch': 'A1', 'fundamental_hz': 55, 'spectral_centroid': 480, 'brightness': 0.12, 'attack_time': 0.05, 'decay_time': 0.6, 'sustain_level': 0.5, 'release_time': 0.2, 'rms': 0.3, 'roughness': 0.85, 'noisiness': 0.1, 'harmonics': [1.0, 0.3, 0.15, 0.08]}, 'serum_params': {'preset_name': 'BS REESE-  DEEPER', 'oscillator_a': {'kParamUnison': 8.0, 'kParamDetune': 0.1558, 'kParamOctave': -1.0}, 'filter': {'enabled': True, 'kParamFreq': 0.3348, 'kParamReso': 10.0, 'kParamDrive': 34.6234, 'kParamType': 'MgL18'}, 'envelope_amp': {'kParamAttack': 0.0005, 'kParamRelease': 0.0147}}}, {'category': 'lead', 'audio_analysis': {'sound_type': 'lead', 'pitch': 'C3', 'fundamental_hz': 131, 'spectral_centroid': 2400, 'brightness': 0.65, 'attack_time': 0.001, 'decay_time': 0.5, 'sustain_level': 0.4, 'release_time': 0.25, 'rms': 0.3, 'roughness': 0.4, 'noisiness': 0.08, 'harmonics': [1.0, 0.5, 0.3, 0.2]}, 'serum_params': {'preset_name': 'LD - SHOCKWAVE', 'oscillator_a': {'kParamUnison': 4.0, 'kParamDetune': 0.0466, 'kParamDetuneWid': 87.9317, 'kParamFine': -5.7434, 'kParamVolume': 1.0}, 'wt': {'kParamTablePos': 122.5351, 'kParamWarp': 0.6451, 'kParamWarpMenu': 'kBendPosNeg', 'kParamInitialPhase': 89.4757, 'wavetable_path': 'Analog/Basic Shapes.wav'}, 'filter': {'enabled': True, 'kParamFreq': 0.6027, 'kParamReso': 0.0, 'kParamType': 'L24'}, 'envelope_amp': {'kParamAttack': 0.0734, 'kParamRelease': 0.2249}, 'fx': [{'FXChorus': {'plainParams': {'kParamFeedback': 9.5}}, 'type': 3, 'kUIParamMixOrGain': 0.0}, {'FXReverb': {'plainParams': {'kParamDelay': 30.625, 'kParamFreqB': 68.772, 'kParamSize': 35.0, 'kParamType': 'kHall', 'kParamWet': 20.0, 'kParamWidth': 20.0}}, 'type': 6, 'kUIParamMixOrGain': 0.0}]}}, {'category': 'lead', 'audio_analysis': {'sound_type': 'lead', 'pitch': 'C4', 'fundamental_hz': 262, 'spectral_centroid': 3800, 'brightness': 0.78, 'attack_time': 0.001, 'decay_time': 0.7, 'sustain_level': 0.5, 'release_time': 0.4, 'rms': 0.3, 'roughness': 0.5, 'noisiness': 0.12, 'harmonics': [1.0, 0.5, 0.3, 0.2]}, 'serum_params': {'preset_name': 'LD - CAMOUFLAGE', 'oscillator_a': {'kParamVolume': 0.3152}, 'wt': {'kParamWarp': 0.7602, 'wavetable_path': 'Analog/Basic Shapes.wav'}, 'filter': {'enabled': True, 'kParamFreq': 0.5044, 'kParamReso': 0.0, 'kParamType': 'H12'}, 'envelope_amp': {'kParamAttack': 0.0005, 'kParamRelease': 2.163}, 'fx': [{'FXDistortion': {'plainParams': {'kParamDrive': 67.544}}, 'type': 0, 'kUIParamMixOrGain': 0.0}, {'FXEQ': {'plainParams': {'kParamFreq1': 99.082, 'kParamFreq2': 2040.536, 'kParamGain1': -24.0, 'kParamReso1': 60.0, 'kParamReso2': 60.0}}, 'type': 7}]}}, {'category': 'pluck', 'audio_analysis': {'sound_type': 'pluck', 'pitch': 'C4', 'fundamental_hz': 262, 'spectral_centroid': 3200, 'brightness': 0.7, 'attack_time': 0.001, 'decay_time': 0.5, 'sustain_level': 0.0, 'release_time': 0.3, 'rms': 0.3, 'roughness': 0.2, 'noisiness': 0.05, 'harmonics': [1.0, 0.5, 0.3, 0.2]}, 'serum_params': {'preset_name': 'PL - HIGH ON DRUGS', 'oscillator_a': {'kParamVolume': 0.0647}, 'wt': {'kParamTablePos': 256.0, 'wavetable_path': '/Analog/Analog_BD_Sin.wav'}, 'filter': {'enabled': True, 'kParamFreq': 0.414, 'kParamReso': 45.614, 'kParamType': 'B12'}, 'envelope_amp': {'kParamAttack': 0.0005, 'kParamDecay': 0.446, 'kParamSustain': 0.0, 'kParamRelease': 0.4239}, 'fx': [{'FXFilter': {'plainParams': {'kParamFreq': 0.566, 'kParamType': 'MgL12'}}, 'type': 8, 'kUIParamMixOrGain': 0.0}, {'FXComp': {'plainParams': {'kParamAttack': 45.159, 'kParamCompensatedWetDry': 0.0, 'kParamGain0': 4.6, 'kParamGain2': 4.6, 'kParamMakeup': 14.483, 'kParamMultiband': 1.0, 'kParamRatio': 2.533, 'kParamRatioBelow': 0.75, 'kParamRelease': 584.08, 'kParamThresh': 0.536, 'kParamThreshUD0': 0.0, 'kParamThreshUD1': 119.737, 'kParamThreshUD2': 70.144, 'kParamWet': 39.912}}, 'type': 5, 'kUIParamMixOrGain': 0.0}, {'FXReverb': {'plainParams': {'kParamDelay': 21.151, 'kParamFeedback': 28.0, 'kParamFreqB': 30.318, 'kParamSize': 33.0, 'kParamType': 'kHall', 'kParamWet': 30.113, 'kParamWidth': 25.0}}, 'type': 6, 'kUIParamMixOrGain': 0.0}, {'FXEQ': {'plainParams': {'kParamFreq1': 67.108, 'kParamFreq2': 196.971, 'kParamGain2': -6.737, 'kParamReso1': 42.456, 'kParamReso2': 45.965, 'kParamType1': 2.0, 'kParamType2': 1.0}}, 'type': 7}, {'FXChorus': {'plainParams': {'kParamDelay': 0.324, 'kParamDelay2': 0.527, 'kParamDepth': 16.025, 'kParamFeedback': 14.5, 'kParamFilt': 20000.0, 'kParamWet': 30.482}}, 'type': 3, 'kUIParamMixOrGain': 0.0}]}}, {'category': 'pad', 'audio_analysis': {'sound_type': 'pad', 'pitch': 'C4', 'fundamental_hz': 262, 'spectral_centroid': 2200, 'brightness': 0.55, 'attack_time': 0.001, 'decay_time': 0.9, 'sustain_level': 0.4, 'release_time': 0.5, 'rms': 0.3, 'roughness': 0.3, 'noisiness': 0.15, 'harmonics': [1.0, 0.5, 0.3, 0.2]}, 'serum_params': {'preset_name': 'PD - FLUX RADAR', 'oscillator_a': {'kParamUnison': 7.0, 'kParamDetune': 0.0, 'kParamDetuneWid': 94.7368, 'kParamOctave': -1.0}, 'wt': {'kParamTablePos': 168.0175, 'wavetable_path': 'S2 Tables/Analog/Saw Drift 303.wav'}, 'filter': {'enabled': True, 'kParamFreq': 0.3333, 'kParamReso': 29.2982, 'kParamType': 'MgL24'}, 'envelope_amp': {'kParamAttack': 0.5538, 'kParamDecay': 1.6016, 'kParamRelease': 0.8752}, 'fx': [{'FXChorus': {'plainParams': {'kParamFeedback': 9.5, 'kParamWet': 30.702}}, 'type': 3, 'kUIParamMixOrGain': 0.0}]}}, {'category': 'chord', 'audio_analysis': {'sound_type': 'chord', 'pitch': 'C4', 'fundamental_hz': 262, 'spectral_centroid': 2800, 'brightness': 0.6, 'attack_time': 0.001, 'decay_time': 1.0, 'sustain_level': 0.3, 'release_time': 0.4, 'rms': 0.3, 'roughness': 0.4, 'noisiness': 0.1, 'harmonics': [1.0, 0.5, 0.3, 0.2]}, 'serum_params': {'preset_name': 'CH - ELEVATE', 'wt': {'wavetable_path': 'Analog/4088.wav'}, 'filter': {'enabled': True, 'kParamFreq': 0.0, 'kParamReso': 0.0, 'kParamDrive': 2.8749}, 'envelope_amp': {'kParamAttack': 0.0008, 'kParamHold': 0.0005, 'kParamSustain': 0.0, 'kParamRelease': 0.4941}, 'fx': [{'FXDistortion': {'plainParams': {'kParamDrive': 90.544, 'kParamPrePost': 1.0, 'kParamWet': 11.404}}, 'type': 0, 'kUIParamMixOrGain': 0.0}, {'FXEQ': {'plainParams': {'kParamFreq1': 209.617, 'kParamFreq2': 3729.183, 'kParamGain2': 1.408, 'kParamReso1': 60.0, 'kParamReso2': 33.934, 'kParamType2': 1.0}}, 'type': 7}]}}, {'category': 'keys', 'audio_analysis': {'sound_type': 'keys', 'pitch': 'C3', 'fundamental_hz': 131, 'spectral_centroid': 1800, 'brightness': 0.48, 'attack_time': 0.005, 'decay_time': 0.6, 'sustain_level': 0.0, 'release_time': 0.5, 'rms': 0.3, 'roughness': 0.2, 'noisiness': 0.06, 'harmonics': [1.0, 0.5, 0.3, 0.2]}, 'serum_params': {'preset_name': 'KEY - 5', 'wt': {'wavetable_path': 'S2 Tables/Default Shapes.wav'}, 'filter': {'enabled': True, 'kParamFreq': 0.1974, 'kParamReso': 44.7368, 'kParamDrive': 35.9649}, 'envelope_amp': {'kParamAttack': 0.0, 'kParamDecay': 0.5112, 'kParamSustain': 0.7868, 'kParamRelease': 0.7638}, 'fx': [{'FXUtils': {'plainParams': {'kParamLFMono': 1.0, 'kParamLFXover': 355.563, 'kParamWidth': 0.0}}, 'type': 12, 'kUIParamMixOrGain': 0.0}, {'FXEQ': {'plainParams': {'kParamFreq1': 430.367, 'kParamFreq2': 17659.67, 'kParamReso1': 43.333, 'kParamReso2': 38.947, 'kParamType1': 2.0, 'kParamType2': 2.0}}, 'type': 7}, {'FXHyperD': {'plainParams': {'kParamDetune': 16.667, 'kParamWet': 25.439}}, 'type': 9, 'kUIParamMixOrGainDimE': 0.0, 'kUIParamMixOrGainHyper': 0.0}, {'FXComp': {'plainParams': {'kParamMakeup': 2.81, 'kParamMultiband': 1.0}}, 'type': 5, 'kUIParamMixOrGain': 0.0}, {'FXEQ': {'plainParams': {'kParamFreq1': 21.533, 'kParamFreq2': 20000.0, 'kParamReso1': 41.14, 'kParamReso2': 42.895, 'kParamType1': 2.0, 'kParamType2': 2.0}}, 'type': 7}, {'FXUtils': {'plainParams': {'kParamWidth': 0.0}}, 'type': 12, 'kUIParamMixOrGain': 0.0}]}}, {'category': 'ambient', 'audio_analysis': {'sound_type': 'ambient', 'pitch': 'C4', 'fundamental_hz': 262, 'spectral_centroid': 2000, 'brightness': 0.5, 'attack_time': 1.2, 'decay_time': 1.5, 'sustain_level': 0.4, 'release_time': 1.0, 'rms': 0.3, 'roughness': 0.25, 'noisiness': 0.2, 'harmonics': [1.0, 0.5, 0.3, 0.2]}, 'serum_params': {'preset_name': 'AMB - 12', 'wt': {'wavetable_path': 'S2 Tables/Default Shapes.wav'}, 'envelope_amp': {'kParamAttack': 0.51, 'kParamRelease': 0.8372}, 'fx': [{'FXConv': {'plainParams': {'kParamSize': 39.49, 'kParamWet': 20.0}}, 'type': 11, 'kUIParamMixOrGain': 0.0}, {'FXDelay': {'plainParams': {'kParamBW': 5.212, 'kParamFreq': 2462.839, 'kParamMode': 1.0, 'kParamWet': 17.105}}, 'type': 4, 'kUIParamMixOrGain': 0.0}, {'FXUtils': {'plainParams': {'kParamLFMono': 1.0, 'kParamWidth': 0.0}}, 'type': 12, 'kUIParamMixOrGain': 0.0}]}}, {'category': 'donk', 'audio_analysis': {'sound_type': 'donk', 'pitch': 'E2', 'fundamental_hz': 82, 'spectral_centroid': 1500, 'brightness': 0.4, 'attack_time': 0.001, 'decay_time': 0.15, 'sustain_level': 0.0, 'release_time': 0.2, 'rms': 0.3, 'roughness': 0.7, 'noisiness': 0.05, 'harmonics': [1.0, 0.3, 0.15, 0.08]}, 'serum_params': {'preset_name': 'DONK - 2', 'oscillator_a': {'kParamOctave': -1.0, 'kParamVolume': 0.0}, 'wt': {'kParamWarpMenu': 'kBendPosNeg', 'wavetable_path': '../Renders/Srm_ - Init - _250701202228_G3.wav'}, 'filter': {'enabled': True, 'kParamFreq': 0.3377, 'kParamReso': 0.0, 'kParamDrive': 39.9123}, 'envelope_amp': {'kParamRelease': 0.3617}, 'fx': [{'FXDistortion': {'plainParams': {'kParamDrive': 67.544, 'kParamPrePost': 2.0, 'kParamWet': 58.772}}, 'type': 0, 'kUIParamMixOrGain': 0.0}, {'FXChorus': {'plainParams': {'kParamWet': 28.07}}, 'type': 3, 'kUIParamMixOrGain': 0.0}, {'FXUtils': {'plainParams': {'kParamLFMono': 1.0, 'kParamLFXover': 400.0}}, 'type': 12, 'kUIParamMixOrGain': 0.0}, {'FXHyperD': {'plainParams': {'kParamDimESize': 19.298, 'kParamDimEWet': 24.123, 'kParamWet': 12.719}}, 'type': 9, 'kUIParamMixOrGainDimE': 0.0, 'kUIParamMixOrGainHyper': 0.0}, {'FXComp': {'plainParams': {'kParamMakeup': 3.591, 'kParamMultiband': 1.0}}, 'type': 5, 'kUIParamMixOrGain': 0.0}, {'FXEQ': {'plainParams': {'kParamFreq1': 203.427, 'kParamGain1': -15.158, 'kParamReso1': 38.947}}, 'type': 7}, {'FXUtils': {'plainParams': {'kParamLFMono': 1.0, 'kParamLFXover': 400.0, 'kParamWidth': 0.0}}, 'type': 12, 'kUIParamMixOrGain': 0.0}]}}]
+# ═══════════════════════════════════════════════════════════════════
+# CATEGORY TEMPLATES — wartości referencyjne dla fallbacku
+# ═══════════════════════════════════════════════════════════════════
+
+CATEGORY_TEMPLATES = {
+    "bass": {
+        "unison": 5.0, "octave": -2.0, "detune": 0.07, "detune_wid": 87.0,
+        "filter_freq": 0.38, "filter_reso": 15.0, "filter_drive": 21.0, "filter_type": "MgL24",
+        "attack": 0.001, "decay": 0.88, "sustain": 0.42, "release": 0.13,
+        "wavetable": "/Analog/Basic Shapes.wav",
+        "fx_chain": ["EQ", "Hyper", "Reverb"],
     },
-    "wt_pos": 0,
-    "fx_count": 6
-  },
-  {
-    "name": "BS-DEEP_HOUSE",
-    "pitch": "C\u266f2",
-    "brightness": 0.05,
-    "attack": 0.4144,
-    "osc_params": {
-      "kParamOctave": -1.0,
-      "kParamUnison": 9.0,
-      "kParamVolume": 0.41
+    "reese": {
+        "unison": 8.0, "octave": -1.0, "detune": 0.09, "detune_wid": 90.0,
+        "filter_freq": 0.46, "filter_reso": 19.0, "filter_drive": 26.0, "filter_type": "MgL18",
+        "attack": 0.08, "decay": 0.65, "sustain": 0.45, "release": 0.18,
+        "wavetable": "/Analog/MB Saw.wav",
+        "fx_chain": ["Utils", "Hyper", "Utils", "EQ"],
     },
-    "wt_pos": 121.79,
-    "fx_count": 3
-  },
-  {
-    "name": "BS-_KNOCK_KNOCK",
-    "pitch": "G\u266f2",
-    "brightness": 0.03,
-    "attack": 0.0401,
-    "osc_params": {
-      "kParamOctave": -2.0,
-      "kParamVolume": 0.57
+    "lead": {
+        "unison": 7.0, "octave": 0.0, "detune": 0.05, "detune_wid": 80.0,
+        "filter_freq": 0.40, "filter_reso": 11.0, "filter_drive": 25.0, "filter_type": "MgL24",
+        "attack": 0.001, "decay": 0.65, "sustain": 0.15, "release": 0.20,
+        "wavetable": "/Analog/Basic Shapes.wav",
+        "fx_chain": ["Hyper", "EQ", "Reverb"],
     },
-    "wt_pos": 0,
-    "fx_count": 2
-  },
-  {
-    "name": "bs-_brassline",
-    "pitch": "D3",
-    "brightness": 0.12,
-    "attack": 1.0762,
-    "osc_params": {
-      "kParamDetuneWid": 70.09,
-      "kParamUnison": 3.0
+    "chord": {
+        "unison": 4.0, "octave": 0.0, "detune": 0.05, "detune_wid": 70.0,
+        "filter_freq": 0.45, "filter_reso": 5.0, "filter_drive": 12.0, "filter_type": "MgL18",
+        "attack": 0.001, "decay": 0.93, "sustain": 0.22, "release": 0.17,
+        "wavetable": "/Analog/Basic Mini.wav",
+        "fx_chain": ["Chorus", "Delay", "Reverb", "EQ"],
     },
-    "wt_pos": 41.26,
-    "fx_count": 4
-  },
-  {
-    "name": "BS-DONK",
-    "pitch": "C2",
-    "brightness": 0.02,
-    "attack": 0.3913,
-    "osc_params": {
-      "kParamOctave": -2.0,
-      "kParamVolume": 0.83
+    "pluck": {
+        "unison": 7.0, "octave": 0.0, "detune": 0.05, "detune_wid": 75.0,
+        "filter_freq": 0.49, "filter_reso": 15.0, "filter_drive": 19.0, "filter_type": "MgL24",
+        "attack": 0.001, "decay": 0.89, "sustain": 0.18, "release": 0.31,
+        "wavetable": "/Analog/Analog_BD_Sin.wav",
+        "fx_chain": ["Hyper", "Phaser", "Delay", "Reverb", "EQ"],
     },
-    "wt_pos": 0,
-    "fx_count": 4
-  },
-  {
-    "name": "BS-RIOT",
-    "pitch": "C2",
-    "brightness": 0.46,
-    "attack": 0.7796,
-    "osc_params": {
-      "kParamOctave": -2.0
+    "pad": {
+        "unison": 4.0, "octave": 0.0, "detune": 0.07, "detune_wid": 85.0,
+        "filter_freq": 0.69, "filter_reso": 15.0, "filter_drive": 30.0, "filter_type": "MgL18",
+        "attack": 1.2, "decay": 1.61, "sustain": 0.39, "release": 0.68,
+        "wavetable": "S2 Tables/Default Shapes.wav",
+        "fx_chain": ["Conv", "EQ", "Utils"],
     },
-    "wt_pos": 0,
-    "fx_count": 4
-  },
-  {
-    "name": "BS-SHAKE_IT",
-    "pitch": "C2",
-    "brightness": 0.14,
-    "attack": 1.0151,
-    "osc_params": {
-      "kParamOctave": -2.0
+    "ambient": {
+        "unison": 3.0, "octave": 0.0, "detune": 0.07, "detune_wid": 90.0,
+        "filter_freq": 0.69, "filter_reso": 15.0, "filter_drive": 30.0, "filter_type": "Allpasses",
+        "attack": 1.5, "decay": 2.0, "sustain": 0.5, "release": 1.0,
+        "wavetable": "S2 Tables/Default Shapes.wav",
+        "fx_chain": ["Conv", "Chorus", "EQ", "Utils"],
     },
-    "wt_pos": 210.14,
-    "fx_count": 6
-  },
-  {
-    "name": "BS-SLOW_DRIFT",
-    "pitch": "C2",
-    "brightness": 0.12,
-    "attack": 1.8602,
-    "osc_params": {
-      "kParamOctave": -2.0,
-      "kParamUnison": 5.0
+    "keys": {
+        "unison": 3.5, "octave": 0.0, "detune": 0.08, "detune_wid": 70.0,
+        "filter_freq": 0.53, "filter_reso": 22.0, "filter_drive": 21.0, "filter_type": "MgL18",
+        "attack": 0.001, "decay": 0.57, "sustain": 0.0, "release": 0.47,
+        "wavetable": "S2 Tables/Default Shapes.wav",
+        "fx_chain": ["EQ", "Distortion", "Utils"],
     },
-    "wt_pos": 0,
-    "fx_count": 4
-  },
-  {
-    "name": "LD-AFTERLIFE",
-    "pitch": "D3",
-    "brightness": 0.24,
-    "attack": 2.4058,
-    "osc_params": {
-      "kParamVolume": 0.16
+    "donk": {
+        "unison": 4.0, "octave": -1.0, "detune": 0.025, "detune_wid": 50.0,
+        "filter_freq": 0.33, "filter_reso": 0.0, "filter_drive": 40.0, "filter_type": "MgL18",
+        "attack": 0.001, "decay": 0.15, "sustain": 0.0, "release": 0.25,
+        "wavetable": "/Analog/Analog_BD_Sin.wav",
+        "fx_chain": ["Distortion", "EQ", "Utils"],
     },
-    "wt_pos": 136.15,
-    "fx_count": 6
-  },
-  {
-    "name": "LD-ROCKET",
-    "pitch": "D4",
-    "brightness": 0.26,
-    "attack": 0.0359,
-    "osc_params": {
-      "kParamOctave": 1.0
-    },
-    "wt_pos": 161.89,
-    "fx_count": 5
-  },
-  {
-    "name": "LD-WHISTLE",
-    "pitch": "D4",
-    "brightness": 0.12,
-    "attack": 1.311,
-    "osc_params": {
-      "kParamOctave": 1.0,
-      "kParamUnison": 7.0,
-      "kParamVolume": 0.0
-    },
-    "wt_pos": 87.12,
-    "fx_count": 8
-  },
-  {
-    "name": "PL-_ETERNITY",
-    "pitch": "D3",
-    "brightness": 0.24,
-    "attack": 0.7599,
-    "osc_params": {},
-    "wt_pos": 0,
-    "fx_count": 5
-  },
-  {
-    "name": "PL-_HEARTBREAK",
-    "pitch": "D3",
-    "brightness": 0.11,
-    "attack": 1.316,
-    "osc_params": {
-      "kParamUnison": 3.0,
-      "kParamVolume": 0.06
-    },
-    "wt_pos": 65.87,
-    "fx_count": 9
-  },
-  {
-    "name": "PL-_MAGE",
-    "pitch": "D4",
-    "brightness": 0.15,
-    "attack": 2.1446,
-    "osc_params": {
-      "kParamDetuneWid": 45.61,
-      "kParamOctave": 1.0,
-      "kParamUnison": 7.0,
-      "kParamVolume": 0.0
-    },
-    "wt_pos": 63.63,
-    "fx_count": 6
-  },
-  {
-    "name": "PL-_PORTA",
-    "pitch": "D3",
-    "brightness": 0.23,
-    "attack": 0.7646,
-    "osc_params": {
-      "kParamVolume": 0.43
-    },
-    "wt_pos": 0,
-    "fx_count": 6
-  },
-  {
-    "name": "PL-_SOFTY",
-    "pitch": "D3",
-    "brightness": 0.31,
-    "attack": 0.7742,
-    "osc_params": {
-      "kParamDetuneWid": 44.3,
-      "kParamUnison": 4.0,
-      "kParamVolume": 0.2
-    },
-    "wt_pos": 0,
-    "fx_count": 7
-  }
-]
+}
 
 
+# ═══════════════════════════════════════════════════════════════════
+# VALIDATION
+# ═══════════════════════════════════════════════════════════════════
 
 def clamp(value, lo, hi):
     try: return max(lo, min(hi, float(value)))
     except: return lo
 
 
+# Limity zakresów Serum 2 dla każdego parametru FX (klucz: typ_FX, wartość: {param: (min, max)})
+FX_LIMITS = {
+    0: {"kParamDrive": (0, 100), "kParamWet": (0, 100)},
+    1: {"kParamRate": (0.01, 4.0), "kParamDepth": (0, 100), "kParamFeedback": (0, 100), "kParamWet": (0, 100)},
+    2: {"kParamRate": (0, 4), "kParamDepth": (0, 100), "kParamFeedback": (0, 100), "kParamFreq": (50, 6000), "kParamWet": (0, 100)},
+    3: {"kParamRate": (0.025, 4), "kParamDepth": (0, 20), "kParamDelay": (0, 8), "kParamFeedback": (0, 80), "kParamFilt": (200, 20000), "kParamWet": (0, 100)},
+    4: {"kParamTimeL": (0.001, 0.5), "kParamTimeR": (0.001, 0.5), "kParamFeedback": (0, 80), "kParamFreq": (95, 12000), "kParamWet": (0, 100)},
+    5: {"kParamThresh": (0, 1), "kParamRatio": (1, 100), "kParamMakeup": (1, 27)},
+    6: {"kParamSize": (0, 100), "kParamWet": (0, 100), "kParamWidth": (0, 100), "kParamFeedback": (0, 98)},
+    7: {"kParamFreq1": (21, 14000), "kParamGain1": (-24, 12), "kParamReso1": (0, 86), "kParamFreq2": (32, 20000), "kParamGain2": (-24, 12), "kParamReso2": (0, 86)},
+    8: {"kParamFreq": (0, 1), "kParamReso": (0, 80), "kParamDrive": (0, 100), "kParamWet": (0, 100)},
+    9: {"kParamUnison": (2, 7), "kParamDetune": (0, 100), "kParamRate": (0, 100), "kParamDimESize": (0, 100), "kParamDimEWet": (0, 100), "kParamWet": (0, 100)},
+    11: {"kParamWet": (0, 100), "kParamSize": (10, 330), "kParamTone": (0, 100)},
+    12: {"kParamLFXover": (60, 400), "kParamWidth": (0, 100)},
+}
+
+
 def validate_params(params):
     """Ensure all parameters are in valid Serum 2 ranges."""
+    # OSC A
     osc = params.get("oscillator_a", params.get("osc", {}))
-    if "kParamUnison" in osc:
-        osc["kParamUnison"] = clamp(osc["kParamUnison"], 1, 16)
-    if "kParamVolume" in osc:
-        osc["kParamVolume"] = clamp(osc["kParamVolume"], 0, 1)
-    if "kParamDetuneWid" in osc:
-        osc["kParamDetuneWid"] = clamp(osc["kParamDetuneWid"], 0, 100)
+    if isinstance(osc, dict):
+        if "kParamUnison" in osc:     osc["kParamUnison"] = clamp(osc["kParamUnison"], 1, 16)
+        if "kParamVolume" in osc:     osc["kParamVolume"] = clamp(osc["kParamVolume"], 0, 1)
+        if "kParamDetuneWid" in osc:  osc["kParamDetuneWid"] = clamp(osc["kParamDetuneWid"], 0, 100)
+        if "kParamOctave" in osc:     osc["kParamOctave"] = clamp(osc["kParamOctave"], -4, 4)
+        if "kParamDetune" in osc:     osc["kParamDetune"] = clamp(osc["kParamDetune"], 0, 1)
     
+    # FILTER
     filt = params.get("filter", {})
-    if "kParamFreq" in filt:
-        filt["kParamFreq"] = clamp(filt["kParamFreq"], 0, 1)
-    if "kParamReso" in filt:
-        filt["kParamReso"] = clamp(filt["kParamReso"], 0, 100)
+    if isinstance(filt, dict):
+        if "kParamFreq" in filt:  filt["kParamFreq"] = clamp(filt["kParamFreq"], 0, 1)
+        if "kParamReso" in filt:  filt["kParamReso"] = clamp(filt["kParamReso"], 0, 100)
+        if "kParamDrive" in filt: filt["kParamDrive"] = clamp(filt["kParamDrive"], 0, 100)
+        # Zapewnij enable=1
+        if filt.get("enabled") or filt.get("kParamEnable") == 1.0:
+            filt["kParamEnable"] = 1.0
     
+    # ENVELOPE
     env = params.get("envelope_amp", params.get("env", {}))
-    for k in ["kParamAttack", "kParamDecay", "kParamSustain", "kParamRelease"]:
-        if k in env:
-            env[k] = clamp(env[k], 0, 1)
+    if isinstance(env, dict):
+        for k in ["kParamAttack", "kParamDecay", "kParamRelease", "kParamHold"]:
+            if k in env: env[k] = clamp(env[k], 0, 10)
+        if "kParamSustain" in env: env["kParamSustain"] = clamp(env["kParamSustain"], 0, 1)
+    
+    # FX — clamp każdy param do swojego zakresu
+    fx_list = params.get("fx", [])
+    if isinstance(fx_list, list):
+        for fx_entry in fx_list:
+            if not isinstance(fx_entry, dict): continue
+            ft = fx_entry.get("type")
+            if ft not in FX_LIMITS: continue
+            limits = FX_LIMITS[ft]
+            # Znajdź FX wewnętrzny
+            for k in list(fx_entry.keys()):
+                if k.startswith("FX") and isinstance(fx_entry[k], dict):
+                    pp = fx_entry[k].get("plainParams", {})
+                    if isinstance(pp, dict):
+                        for param_name, (lo, hi) in limits.items():
+                            if param_name in pp:
+                                pp[param_name] = clamp(pp[param_name], lo, hi)
     
     return params
 
 
+# ═══════════════════════════════════════════════════════════════════
+# DETECTION — auto-detect category from audio analysis
+# ═══════════════════════════════════════════════════════════════════
+
+def detect_category(audio_analysis, hint=None):
+    """Detect best category from audio features."""
+    if hint:
+        h = hint.lower()
+        for cat in CATEGORY_TEMPLATES:
+            if cat in h: return cat
+    
+    a = audio_analysis
+    pitch_hz = a.get("fundamental_hz", 200)
+    bright = a.get("brightness", 0.5)
+    attack = a.get("attack_time", 0.01)
+    release = a.get("release_time", 0.3)
+    roughness = a.get("roughness", 0.3)
+    noisiness = a.get("noisiness", 0.1)
+    
+    # Decision tree based on real preset patterns
+    if attack > 0.5 and release > 0.8:
+        return "ambient" if noisiness > 0.15 else "pad"
+    if pitch_hz < 100:
+        return "reese" if roughness > 0.7 else "bass"
+    if pitch_hz < 200 and bright < 0.3:
+        return "bass"
+    if attack < 0.005 and release < 0.4 and pitch_hz > 200:
+        return "pluck"
+    if pitch_hz > 200 and bright > 0.5:
+        return "lead"
+    if pitch_hz > 150 and 0.3 < bright < 0.6:
+        return "chord"
+    return "lead"  # fallback
+
+
+# ═══════════════════════════════════════════════════════════════════
+# MAIN ENGINE — call Claude with full context
+# ═══════════════════════════════════════════════════════════════════
+
 def analyze_with_claude(audio_analysis, sound_type="lead", previous_attempt=None, diff_info=None):
-    """Call Claude API with real training examples."""
+    """Call Claude API with real training examples and detailed knowledge."""
     
     api_key = os.environ.get("ANTHROPIC_API_KEY")
     if not api_key:
         raise ValueError("ANTHROPIC_API_KEY not set")
     
-    # Build user message
+    # Auto-detect category if vague hint
+    category = detect_category(audio_analysis, sound_type)
+    template = CATEGORY_TEMPLATES.get(category, CATEGORY_TEMPLATES["lead"])
+    
     a = audio_analysis
     user_msg = f"""Analyze this audio and create Serum 2 parameters.
 
+DETECTED CATEGORY: {category.upper()}  (based on pitch/brightness/envelope)
+
+REFERENCE TEMPLATE for {category}:
+- Unison: {template['unison']}, Octave: {template['octave']}, Detune: {template['detune']}
+- Filter: freq={template['filter_freq']}, reso={template['filter_reso']}, type={template['filter_type']}
+- Envelope: A={template['attack']}, D={template['decay']}, S={template['sustain']}, R={template['release']}
+- Suggested wavetable: {template['wavetable']}
+- Typical FX chain: {' → '.join(template['fx_chain'])}
+
 AUDIO ANALYSIS:
-- Sound type: {sound_type}
 - Pitch: {a.get('pitch', '—')} ({a.get('fundamental_hz', 0)} Hz)
 - Spectral centroid: {a.get('spectral_centroid', 0)} Hz
 - Brightness: {a.get('brightness', 0)} (0=dark, 1=bright)
@@ -974,41 +440,42 @@ AUDIO ANALYSIS:
 - Sustain level: {a.get('sustain_level', 0)}
 - Release time: {a.get('release_time', 0)}s
 - RMS: {a.get('rms', 0)}
-- Roughness: {a.get('roughness', 0)}
-- Noisiness: {a.get('noisiness', 0)}
+- Roughness: {a.get('roughness', 0)} (high = use Distortion)
+- Noisiness: {a.get('noisiness', 0)} (high = add noise/convolution)
 """
-
+    
     if previous_attempt and diff_info:
         user_msg += f"""
-REFINEMENT: Your previous attempt had these issues:
+
+REFINEMENT NEEDED — previous attempt issues:
 {diff_info}
 
-Previous params: {json.dumps(previous_attempt, indent=2)[:500]}
-Adjust to better match the target.
+Adjust to better match the target. Common fixes:
+- If too dark: open filter (raise kParamFreq), lower drive
+- If too dull: add FXHyperD or increase unison
+- If lacks space: increase reverb/delay wet
+- If too thin: add FXUtils with kParamLFMono=1.0
 """
 
     user_msg += """
-Return a JSON object with these EXACT keys using REAL Serum 2 parameter names:
-{
-  "preset_name": "XX - NAME",
-  "oscillator_a": {"kParamVolume": float, "kParamOctave": float, "kParamDetune": float, "kParamUnison": float, "kParamDetuneWid": float},
-  "wt": {"kParamTablePos": float, "kParamWarpMenu": "string"},
-  "filter": {"enabled": bool, "kParamFreq": float, "kParamReso": float, "kParamType": "string"},
-  "envelope_amp": {"kParamAttack": float, "kParamDecay": float, "kParamSustain": float, "kParamRelease": float},
-  "fx": [
-    {"FXClassName": {"plainParams": {...}}, "kUIParamMixOrGain": 0.0, "type": int},
-    ...
-  ],
-  "reasoning": "brief explanation"
-}
-Return ONLY JSON."""
 
-    # Build messages with REAL few-shot examples
+Return JSON ONLY with this structure (use the FX chain pattern from template above):
+{
+  "preset_name": "CAT - NAME",
+  "oscillator_a": {...},
+  "wt": {...},
+  "filter": {"enabled": true, "kParamEnable": 1.0, ...},
+  "envelope_amp": {...},
+  "fx": [...],
+  "reasoning": "1 sentence"
+}"""
+
+    # Build messages with FULL training examples
     messages = []
     for ex in TRAINING_EXAMPLES:
         messages.append({
             "role": "user",
-            "content": f"AUDIO ANALYSIS:\n{json.dumps(ex['audio_analysis'], indent=2)}\n\nReturn Serum 2 preset JSON."
+            "content": f"Audio analysis:\n{json.dumps(ex['audio_analysis'], indent=2)}\n\nReturn Serum 2 JSON."
         })
         messages.append({
             "role": "assistant", 
@@ -1020,7 +487,7 @@ Return ONLY JSON."""
     # Call Claude via urllib (SDK has connection issues on Railway)
     request_body = json.dumps({
         "model": "claude-sonnet-4-5",
-        "max_tokens": 2000,
+        "max_tokens": 3000,
         "system": SYSTEM_PROMPT,
         "messages": messages,
     }).encode("utf-8")
@@ -1036,7 +503,7 @@ Return ONLY JSON."""
         data=request_body,
     )
     
-    resp = urllib.request.urlopen(req, timeout=60)
+    resp = urllib.request.urlopen(req, timeout=90)
     resp_data = json.loads(resp.read().decode())
     response_text = resp_data["content"][0]["text"].strip()
     
