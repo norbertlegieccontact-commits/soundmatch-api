@@ -230,12 +230,46 @@ async def analyze(file: UploadFile = File(...), sound_type: str = Form("lead")):
         # 5. Build .SerumPreset file
         log_steps.append({"step": "build_preset", "status": "running"})
         
-        if best_params and os.path.exists(TEMPLATE_PATH):
+        if not best_params:
+            # Fallback: simple rules-based mapping (no Claude)
+            a = analysis
+            brightness = a.get("brightness", 0.5)
+            best_params = {
+                "preset_name": "SM " + sound_type.upper() + " " + a.get("pitch", "A4"),
+                "oscillator_a": {
+                    "waveform": "saw" if brightness > 0.4 else "triangle",
+                    "octave": 0, "detune": 0.2 if sound_type in ("lead", "pad") else 0.0,
+                    "unison_voices": 5 if sound_type in ("lead", "pad") else 1,
+                    "unison_detune": 0.3 if sound_type in ("lead", "pad") else 0.0,
+                    "gain": 0.8, "table_pos": 0, "warp_type": "kPD_OSC"
+                },
+                "oscillator_b": {"enabled": False},
+                "filter": {
+                    "enabled": True, "type": "LP24" if sound_type != "bass" else "LP12",
+                    "cutoff": min(0.95, 0.3 + brightness * 0.65),
+                    "resonance": 0.15, "drive": 0.0
+                },
+                "envelope_amp": {
+                    "attack": min(1.0, a.get("attack_time", 0.01) / 10),
+                    "decay": min(1.0, a.get("decay_time", 0.3) / 5),
+                    "sustain": a.get("sustain_level", 0.7),
+                    "release": min(1.0, a.get("release_time", 0.3) / 5),
+                },
+                "envelope_filter": {"enabled": False},
+                "lfo1": {"enabled": False},
+                "fx": {
+                    "reverb": {"enabled": sound_type in ("pad", "pluck", "lead"), "wet": 0.3, "size": 0.5, "damping": 0.5},
+                    "delay": {"enabled": False},
+                    "distortion": {"enabled": a.get("roughness", 0) > 0.5, "drive": 0.3, "wet": 0.5},
+                    "chorus": {"enabled": sound_type == "pad", "depth": 0.4, "wet": 0.3}
+                },
+                "reasoning": "Rules-based fallback (Claude unavailable)"
+            }
+            engine_used = "rules-fallback"
+        
+        if os.path.exists(TEMPLATE_PATH):
             from ai_engine import build_preset_from_claude_params
             preset_bytes, preset_name = build_preset_from_claude_params(best_params, TEMPLATE_PATH)
-        elif os.path.exists(TEMPLATE_PATH):
-            from engine_v3 import build_preset
-            preset_bytes, preset_name = build_preset(analysis, TEMPLATE_PATH)
         else:
             raise HTTPException(status_code=500, detail="No template found")
         
