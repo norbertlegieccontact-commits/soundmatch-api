@@ -184,17 +184,15 @@ def build_preset_from_params(params: dict, template_path: str):
         pp.update(wt_params)
         wt["plainParams"] = pp
     
-    # ── Wavetable PATH (v5 engine: load actual factory wavetable) ──
+    # ── Wavetable PATH ──
+    # IMPORTANT: We do NOT change relativePathToWT because it must match numFrames/numChannels/sampleRate
+    # of the actual wavetable file in Serum 2 library. Mismatched values crash Serum.
+    # We keep the template's wavetable file and only modify TablePos/Warp/Unison etc.
+    # Brightness differences come from: filter, FX, envelope, unison, octave - not wavetable file.
+    
+    # If AI provided wavetable_path, log it but ignore (kept for forward compatibility)
     wt_path = wt_direct.get("wavetable_path") or osc_a.get("wavetable_path") or osc_a.get("wavetable")
-    if wt_path and isinstance(wt_path, str):
-        wt_block = preset["Oscillator0"]["WTOsc0"]
-        # Remove any embeddedWTData (would conflict with relativePathToWT)
-        if "embeddedWTData" in wt_block:
-            del wt_block["embeddedWTData"]
-        wt_block["relativePathToWT"] = wt_path
-        # Also reset flex curve to clean state (template may have weird curve)
-        if "flex" in wt_block:
-            wt_block["flex"] = {"curveVals": [0.5, 0.5], "numPoints": 1, "xVals": [0.0, 1.0], "yVals": [1.0, 0.0]}
+    # (intentionally not applied - see comment above)
     
     # ── Oscillator B ──
     osc_b = params.get("oscillator_b", {})
