@@ -393,13 +393,11 @@ def analyze_with_claude(audio_analysis: dict, sound_type: str = "lead",
                         previous_attempt: dict = None, diff_info: str = None) -> dict:
     """Send audio analysis to Claude. Optionally refine based on previous diff."""
     
-    import anthropic  # Lazy import
+    import urllib.request, urllib.error  # Direct HTTP — SDK has connection issues on Railway
     
     api_key = os.environ.get("ANTHROPIC_API_KEY")
     if not api_key:
         raise ValueError("ANTHROPIC_API_KEY not set in environment")
-    
-    client = anthropic.Anthropic(api_key=api_key)
     
     # Build the user message
     a = audio_analysis
@@ -464,14 +462,27 @@ Return ONLY JSON. No markdown wrappers, no preamble."""
     
     messages.append({"role": "user", "content": user_msg})
     
-    response = client.messages.create(
-        model="claude-sonnet-4-5",
-        max_tokens=2000,
-        system=SYSTEM_PROMPT,
-        messages=messages,
+    request_body = json.dumps({
+        "model": "claude-sonnet-4-5",
+        "max_tokens": 2000,
+        "system": SYSTEM_PROMPT,
+        "messages": messages,
+    }).encode("utf-8")
+    
+    req = urllib.request.Request(
+        "https://api.anthropic.com/v1/messages",
+        method="POST",
+        headers={
+            "x-api-key": api_key,
+            "anthropic-version": "2023-06-01",
+            "content-type": "application/json",
+        },
+        data=request_body,
     )
     
-    response_text = response.content[0].text.strip()
+    resp = urllib.request.urlopen(req, timeout=60)
+    resp_data = json.loads(resp.read().decode())
+    response_text = resp_data["content"][0]["text"].strip()
     
     # Strip any markdown wrappers
     if response_text.startswith("```"):
