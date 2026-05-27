@@ -128,8 +128,10 @@ def build_preset_from_params(params: dict, template_path: str):
     # ── Oscillator A ──
     osc_a = params.get("oscillator_a", {})
     osc_params = {}
-    # Volume (Claude may use "gain" or "volume")
-    if "volume" in osc_a or "gain" in osc_a:
+    # Volume (Claude may use "gain", "volume", or direct "kParamVolume")
+    if "kParamVolume" in osc_a:
+        osc_params["kParamVolume"] = float(osc_a["kParamVolume"])
+    elif "volume" in osc_a or "gain" in osc_a:
         osc_params["kParamVolume"] = float(osc_a.get("volume", osc_a.get("gain", 0.8)))
     else:
         osc_params["kParamVolume"] = 0.8  # always set a volume
@@ -176,6 +178,15 @@ def build_preset_from_params(params: dict, template_path: str):
         if pp == "default": pp = {}
         pp.update(wt_params)
         wt["plainParams"] = pp
+    
+    # ── Wavetable PATH (v5 engine: load actual factory wavetable) ──
+    wt_path = wt_direct.get("wavetable_path") or osc_a.get("wavetable_path") or osc_a.get("wavetable")
+    if wt_path and isinstance(wt_path, str):
+        wt_block = preset["Oscillator0"]["WTOsc0"]
+        # Remove any embeddedWTData (would conflict with relativePathToWT)
+        if "embeddedWTData" in wt_block:
+            del wt_block["embeddedWTData"]
+        wt_block["relativePathToWT"] = wt_path
     
     # ── Oscillator B ──
     osc_b = params.get("oscillator_b", {})
