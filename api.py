@@ -153,20 +153,28 @@ def health():
 
 @app.get("/api/test-claude")
 def test_claude():
-    api_key = os.environ.get("ANTHROPIC_API_KEY")
-    if not api_key:
-        return {"error": "No API key set"}
+    import urllib.request, urllib.error
+    api_key = os.environ.get("ANTHROPIC_API_KEY", "")
+    results = {}
     try:
-        import anthropic
-        client = anthropic.Anthropic(api_key=api_key)
-        msg = client.messages.create(
-            model="claude-sonnet-4-5",
-            max_tokens=50,
-            messages=[{"role": "user", "content": "Say hello in 3 words"}]
-        )
-        return {"status": "ok", "response": msg.content[0].text}
+        req = urllib.request.Request("https://api.anthropic.com/v1/messages",
+            method="POST",
+            headers={
+                "x-api-key": api_key,
+                "anthropic-version": "2023-06-01",
+                "content-type": "application/json",
+            },
+            data=b'{"model":"claude-sonnet-4-5","max_tokens":10,"messages":[{"role":"user","content":"hi"}]}')
+        resp = urllib.request.urlopen(req, timeout=15)
+        results["status"] = "ok"
+        results["response"] = resp.read().decode()[:200]
+    except urllib.error.HTTPError as e:
+        results["http_error"] = e.code
+        results["body"] = e.read().decode()[:300]
     except Exception as e:
-        return {"error": str(e)[:500], "type": type(e).__name__}
+        results["error"] = str(e)[:500]
+        results["type"] = type(e).__name__
+    return results
 
 @app.post("/api/analyze")
 async def analyze(file: UploadFile = File(...), sound_type: str = Form("lead")):
