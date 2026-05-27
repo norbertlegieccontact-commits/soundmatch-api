@@ -641,7 +641,21 @@ def build_preset_from_claude_params(params: dict, template_path: str):
     
     # Repack everything
     new_json = json.dumps(meta, separators=(",", ":")).encode("utf-8")
-    new_cbor = cbor2.dumps(preset_dict)
+    
+    # CRITICAL: Convert all float64 → float32 before CBOR encoding
+    # cbor2 promotes float32 to float64 on decode, but Serum expects float32
+    def fix_floats(obj):
+        if isinstance(obj, dict):
+            return {k: fix_floats(v) for k, v in obj.items()}
+        elif isinstance(obj, list):
+            return [fix_floats(v) for v in obj]
+        elif isinstance(obj, float):
+            import struct as st
+            return st.unpack('f', st.pack('f', obj))[0]
+        return obj
+    
+    preset_dict_fixed = fix_floats(preset_dict)
+    new_cbor = cbor2.dumps(preset_dict_fixed, canonical=True)
     
     cctx = zstd.ZstdCompressor(level=3)
     new_cbor_compressed = cctx.compress(new_cbor)
