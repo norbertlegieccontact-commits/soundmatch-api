@@ -257,6 +257,68 @@ def build_preset_from_params(params: dict, template_path: str):
     
     # If fx is already a list (v5 direct format), use it directly
     if isinstance(fx, list):
+        # Normalize each FX entry - add REQUIRED inner slots (lfo, lfophasor, etc.)
+        for fx_entry in fx:
+            if not isinstance(fx_entry, dict): continue
+            ft = fx_entry.get("type")
+            # Find inner FX class
+            inner_class = None
+            for k in fx_entry:
+                if k.startswith("FX") and isinstance(fx_entry[k], dict):
+                    inner_class = k
+                    break
+            if not inner_class: continue
+            inner = fx_entry[inner_class]
+            
+            # Add required slots per FX type
+            if ft == 1 or ft == 2 or ft == 3:  # Flanger, Phaser, Chorus
+                if "lfophasor" not in inner:
+                    inner["lfophasor"] = 0.0
+            elif ft == 9:  # HyperD - needs lfo (curve data)
+                if "lfo" not in inner:
+                    # 2 arrays of 8 floats each (LFO curves)
+                    inner["lfo"] = [
+                        [0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5],
+                        [0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5],
+                    ]
+                # HyperD has TWO mix knobs (Hyper + DimE), normalize outer
+                if "kUIParamMixOrGainDimE" not in fx_entry:
+                    fx_entry["kUIParamMixOrGainDimE"] = 0.0
+                if "kUIParamMixOrGainHyper" not in fx_entry:
+                    fx_entry["kUIParamMixOrGainHyper"] = 0.0
+                # Remove generic kUIParamMixOrGain if present (HyperD uses specific ones)
+                if "kUIParamMixOrGain" in fx_entry:
+                    del fx_entry["kUIParamMixOrGain"]
+            elif ft == 11:  # Conv - needs IR data (we don't have IRs, so use a known factory one)
+                if "relativePathToIR" not in inner:
+                    inner["relativePathToIR"] = "Factory/Massive/Cathedral In The Sky.flac"
+                if "numChannels" not in inner:
+                    inner["numChannels"] = 2
+                if "numFrames" not in inner:
+                    inner["numFrames"] = 180611
+                if "sampleRate" not in inner:
+                    inner["sampleRate"] = 44100
+            
+            # All FX (except 7 EQ and 13 Split) need kUIParamMixOrGain at outer level
+            if ft not in (7, 9, 13):  # 9 already handled above
+                if "kUIParamMixOrGain" not in fx_entry:
+                    fx_entry["kUIParamMixOrGain"] = 0.0
+            
+            # Ensure 'type' is LAST key (Serum expects this order)
+            if "type" in fx_entry:
+                t_val = fx_entry.pop("type")
+                fx_entry["type"] = t_val
+            
+            # For Distortion (type 0), add flex at OUTER level (not inner)
+            if ft == 0 and "flex" not in fx_entry:
+                # Insert flex BEFORE kUIParamMixOrGain and type
+                t_val = fx_entry.pop("type", None)
+                ui_val = fx_entry.pop("kUIParamMixOrGain", 0.0)
+                fx_entry["flex"] = [{}, {}]
+                fx_entry["kUIParamMixOrGain"] = ui_val
+                if t_val is not None:
+                    fx_entry["type"] = t_val
+        
         fx_list = fx
         preset["FXRack0"]["FX"] = fx_list
         fx = {}  # skip individual FX processing below
