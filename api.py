@@ -1,34 +1,24 @@
 """
-SoundMatch API Backend
-━━━━━━━━━━━━━━━━━━━━━━
-FastAPI server that receives audio files,
-analyzes them, and returns Serum 2 presets.
-
-Run: uvicorn api:app --host 0.0.0.0 --port 8000
+SoundMatch API v3 — Level 2 + Feedback Loop
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+- Claude AI generates preset
+- Renders via internal Python synth
+- Compares spectrum vs target
+- Sends diff back to Claude for refinement
+- Repeats until similarity >= threshold or max iterations
 """
 
-from fastapi import FastAPI, UploadFile, File, HTTPException
+from fastapi import FastAPI, UploadFile, File, HTTPException, Form
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
-import tempfile
-import shutil
-import os
-import json
-import uuid
-import time
-import pathlib
-import struct
-import copy
-import warnings
+import tempfile, shutil, os, json, uuid, time, pathlib, warnings
 import numpy as np
 import librosa
-import cbor2
-import zstandard as zstd
+import soundfile as sf
 
 warnings.filterwarnings("ignore")
 
 app = FastAPI(title="SoundMatch API", version="3.0")
-
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -36,216 +26,255 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-MAGIC = b"XferJson\x00"
 TEMPLATE_PATH = os.environ.get("SERUM_TEMPLATE", "Default.SerumPreset")
-OUTPUT_DIR = "generated"
-os.makedirs(OUTPUT_DIR, exist_ok=True)
+GENERATED_DIR = pathlib.Path("generated")
+GENERATED_DIR.mkdir(exist_ok=True)
 
-# ── Import engine components ──
-from engine_v3 import (
-    extract_wavetable, save_wavetable_wav,
-    extract_envelope, analyze_spectral_envelope,
-    detect_effects, classify_sound,
-    SERUM_WT_FRAME_SIZE,
-)
+# Feature flags via env vars
+USE_FEEDBACK_LOOP = os.environ.get("USE_FEEDBACK_LOOP", "true").lower() == "true"
+MAX_ITERATIONS = int(os.environ.get("MAX_ITERATIONS", "2"))
+SIMILARITY_TARGET = float(os.environ.get("SIMILARITY_TARGET", "0.85"))
 
 
-def analyze_and_generate(audio_path, job_id):
-    """Full pipeline: audio → analysis → preset."""
-    t0 = time.time()
+def analyze_audio(audio_path: str, sound_type: str = "lead") -> tuple:
+    """Deep spectral analysis. Returns (features_dict, raw_audio)."""
+    y, sr = librosa.load(audio_path, sr=44100, mono=True, duration=10.0)
+    
+    # Pitch detection
+    f0, voiced, _ = librosa.pyin(y, fmin=librosa.note_to_hz("C1"), fmax=librosa.note_to_hz("C8"))
+    voiced_f0 = f0[voiced] if voiced is not None else np.array([])
+    voiced_f0 = voiced_f0[~np.isnan(voiced_f0)] if len(voiced_f0) > 0 else np.array([])
+    
+    if len(voiced_f0) > 0:
+        median_f0 = float(np.median(voiced_f0[voiced_f0 > 0])) if any(voiced_f0 > 0) else 440.0
+        try:
+            pitch = librosa.hz_to_note(median_f0)
+        except Exception:
+            pitch = "A4"
+    else:
+        median_f0 = 440.0
+        pitch = "A4"
+    
+    # Spectral features
+    spectral_centroid = float(np.mean(librosa.feature.spectral_centroid(y=y, sr=sr)))
+    spectral_rolloff = float(np.mean(librosa.feature.spectral_rolloff(y=y, sr=sr)))
+    spectral_flatness = float(np.mean(librosa.feature.spectral_flatness(y=y)))
+    rms = float(np.mean(librosa.feature.rms(y=y)))
+    
+    # Harmonics
+    harmonic, _ = librosa.effects.hpss(y)
+    stft = np.abs(librosa.stft(harmonic))
+    freqs = librosa.fft_frequencies(sr=sr)
+    
+    harmonics = []
+    if median_f0 > 0:
+        fundamental_bin = np.argmin(np.abs(freqs - median_f0))
+        fundamental_amp = float(np.mean(stft[fundamental_bin, :]))
+        for i in range(1, 9):
+            harmonic_freq = median_f0 * i
+            if harmonic_freq < sr / 2:
+                bin_idx = np.argmin(np.abs(freqs - harmonic_freq))
+                harmonic_amp = float(np.mean(stft[bin_idx, :]))
+                ratio = harmonic_amp / (fundamental_amp + 1e-10)
+                harmonics.append(round(ratio, 3))
+    
+    if not harmonics:
+        harmonics = [1.0, 0.5, 0.25, 0.12, 0.06]
+    
+    # Envelope
+    envelope = np.abs(y)
+    smooth_win = int(sr * 0.01)
+    env_smooth = np.convolve(envelope, np.ones(smooth_win) / smooth_win, mode='same')
+    env_norm = env_smooth / (np.max(env_smooth) + 1e-9)
+    
+    peak_idx = int(np.argmax(env_norm))
+    attack_time = float(peak_idx / sr)
+    
+    if peak_idx < len(env_norm) - 1:
+        after_peak = env_norm[peak_idx:]
+        decay_target = 0.37  # 1/e
+        decay_indices = np.where(after_peak < decay_target)[0]
+        decay_time = float(decay_indices[0] / sr) if len(decay_indices) > 0 else float(len(after_peak) / sr)
+        sustain_level = float(np.mean(after_peak[len(after_peak) // 2:])) if len(after_peak) > 100 else 0.5
+    else:
+        decay_time = 0.1
+        sustain_level = 0.7
+    
+    release_time = float(len(y[peak_idx:]) / sr) * 0.3
+    
+    brightness = min(1.0, spectral_centroid / 8000.0)
+    
+    odd_sum = sum(harmonics[i] for i in range(0, len(harmonics), 2))
+    even_sum = sum(harmonics[i] for i in range(1, len(harmonics), 2)) + 0.001
+    roughness = min(1.0, odd_sum / (even_sum * 2))
+    
+    noisiness = min(1.0, float(spectral_flatness) * 10)
+    
+    if len(voiced_f0) > 10:
+        f0_std = float(np.std(voiced_f0[voiced_f0 > 0]))
+        has_vibrato = f0_std > median_f0 * 0.01
+    else:
+        has_vibrato = False
+    
+    features = {
+        "pitch": pitch,
+        "fundamental_hz": round(median_f0, 1),
+        "spectral_centroid": round(spectral_centroid, 1),
+        "spectral_rolloff": round(spectral_rolloff, 1),
+        "harmonics": harmonics[:8],
+        "attack_time": round(attack_time, 4),
+        "decay_time": round(decay_time, 4),
+        "sustain_level": round(sustain_level, 3),
+        "release_time": round(release_time, 4),
+        "rms": round(rms, 4),
+        "brightness": round(brightness, 3),
+        "roughness": round(roughness, 3),
+        "noisiness": round(noisiness, 3),
+        "has_vibrato": has_vibrato,
+        "sound_type": sound_type,
+    }
+    
+    return features, y, median_f0
 
-    # Load
-    y, sr = librosa.load(audio_path, sr=44100, mono=False, duration=30)
-    is_stereo = y.ndim == 2
-    y_mono = (y[0] + y[1]) / 2 if is_stereo else y
-    stereo_width = float(np.mean(np.abs(y[0]-y[1])) / (np.mean(np.abs(y[0]+y[1]))+1e-10)) if is_stereo else 0
 
-    # Pitch
-    f0 = librosa.yin(y_mono, fmin=30, fmax=8000, sr=sr)
-    f0v = f0[(f0 > 30) & (f0 < 8000)]
-    fund = float(np.median(f0v)) if len(f0v) > 0 else 440.0
-    midi = int(round(12 * np.log2(fund / 440) + 69))
-    notes = ['C','C#','D','D#','E','F','F#','G','G#','A','A#','B']
-    note_name = f"{notes[midi%12]}{midi//12-1}"
-
-    # Analysis
-    env = extract_envelope(y_mono, sr)
-    spec = analyze_spectral_envelope(y_mono, sr, fund)
-    fx = detect_effects(y_mono, sr)
-    bw = float(librosa.feature.spectral_bandwidth(y=y_mono, sr=sr).mean())
-    centroid = float(librosa.feature.spectral_centroid(y=y_mono, sr=sr).mean())
-    n_harm = spec["n_audible_harmonics"]
-
-    # Classify
-    stype, conf, scores = classify_sound(fund, env, spec, n_harm)
-
-    # Wavetable extraction
-    wt_frames = extract_wavetable(y_mono, sr, fund, n_frames=32)
-    wt_path = os.path.join(OUTPUT_DIR, f"{job_id}_wavetable.wav")
-    save_wavetable_wav(wt_frames, wt_path)
-
-    # ── Build preset (standalone, no custom WT reference) ──
-    buf = pathlib.Path(TEMPLATE_PATH).read_bytes()
-    off = len(MAGIC)
-    jlen, _ = struct.unpack_from("<II", buf, off); off += 8
-    meta = json.loads(buf[off:off + jlen]); off += jlen
-    clen, _ = struct.unpack_from("<II", buf, off); off += 8
-    preset = cbor2.loads(zstd.ZstdDecompressor().decompress(buf[off:]))
-
-    def sp(section, key, val):
-        if section not in preset: return
-        if isinstance(preset[section].get("plainParams"), str):
-            preset[section]["plainParams"] = {}
-        preset[section]["plainParams"][key] = val
-
-    def snp(section, sub, key, val):
-        if section not in preset or sub not in preset[section]: return
-        if isinstance(preset[section][sub].get("plainParams"), str):
-            preset[section][sub]["plainParams"] = {}
-        preset[section][sub]["plainParams"][key] = val
-
-    # Name
-    prefix = {"lead":"LD","bass":"BS","pad":"PD","pluck":"PL","sub":"SB","chords":"CH","arp":"AR"}.get(stype,"SM")
-    preset_name = f"{prefix} SM {note_name}"
-    meta["presetName"] = preset_name
-    meta["presetAuthor"] = "SoundMatch AI"
-    meta["tags"] = [stype.capitalize(), "SoundMatch"]
-    preset["presetName"] = preset_name
-    preset["presetAuthor"] = "SoundMatch AI"
-    preset["tags"] = meta["tags"]
-
-    # WT Position
-    if n_harm <= 2: wt_pos = 5.0
-    elif n_harm <= 5: wt_pos = 50.0
-    elif n_harm <= 10: wt_pos = 100.0
-    elif n_harm <= 20: wt_pos = 140.0
-    else: wt_pos = 170.0
-
-    sp("Oscillator0", "kParamEnable", 1.0)
-    snp("Oscillator0", "WTOsc0", "kParamTablePos", wt_pos)
-
-    if stereo_width > 0.15 or bw > 1500:
-        uni = min(7.0, max(2.0, float(int(bw/500) + int(stereo_width*4))))
-        sp("Oscillator0", "kParamUnison", uni)
-        sp("Oscillator0", "kParamDetune", min(0.35, max(0.05, stereo_width * 0.5)))
-
-    if stype == "pad" and n_harm > 5:
-        sp("Oscillator1", "kParamEnable", 1.0)
-        sp("Oscillator1", "kParamOctave", 1.0)
-        sp("Oscillator1", "kParamDetune", 0.15)
-        snp("Oscillator1", "WTOsc1", "kParamTablePos", max(0, wt_pos - 30))
-
-    if stype in ("bass", "sub") or fund < 150:
-        sp("Oscillator4", "kParamEnable", 1.0)
-        sp("Oscillator4", "kParamVolume", 0.6)
-
-    def s2p(s, max_s=10.0):
-        if s <= 0.001: return 0.001
-        return min(0.99, float(np.log10(s*1000) / np.log10(max_s*1000)))
-
-    sp("Env0", "kParamAttack", s2p(env["attack_s"]))
-    sp("Env0", "kParamDecay", s2p(env["decay_s"], 5.0))
-    sp("Env0", "kParamSustain", float(env["sustain"]))
-    sp("Env0", "kParamRelease", s2p(env["release_s"]))
-
-    if spec["filter_type"] != "none" and spec["cutoff_hz"] < 15000:
-        sp("VoiceFilter0", "kParamEnable", 1.0)
-        sp("VoiceFilter0", "kParamType", spec["filter_type"])
-        sp("VoiceFilter0", "kParamFreq", float(spec["cutoff_norm"]))
-        sp("VoiceFilter0", "kParamReso", float(spec["resonance"]))
-
-    fx_list = []
-    if fx["reverb"] > 0.1:
-        fx_list.append({"FXReverb": {"plainParams": {
-            "kParamWet": min(80.0, fx["reverb"]*75),
-            "kParamSize": min(90.0, fx["reverb"]*85),
-            "kParamDamping": 40.0,
-        }}, "type": 11})
-    if fx_list:
-        preset["FXRack0"]["FX"] = fx_list
-
-    sp("Global0", "kParamMasterVolume", 0.65)
-
-    # Convert numpy
-    def conv(o):
-        if isinstance(o, dict): return {k: conv(v) for k, v in o.items()}
-        if isinstance(o, list): return [conv(v) for v in o]
-        if hasattr(o, 'item'): return o.item()
-        if hasattr(o, 'tolist'): return o.tolist()
-        return o
-    preset = conv(preset)
-
-    # Pack
-    m_bytes = json.dumps(meta, separators=(",",":")).encode()
-    c = cbor2.dumps(preset)
-    z = zstd.ZstdCompressor(level=3).compress(c)
-    out = bytearray(MAGIC) + struct.pack("<II", len(m_bytes), 0) + m_bytes + struct.pack("<II", len(c), 2) + z
-
-    preset_path = os.path.join(OUTPUT_DIR, f"{job_id}.SerumPreset")
-    pathlib.Path(preset_path).write_bytes(out)
-
-    elapsed = time.time() - t0
-
+@app.get("/api/health")
+def health():
+    has_claude = bool(os.environ.get("ANTHROPIC_API_KEY"))
     return {
-        "job_id": job_id,
-        "preset_name": preset_name,
-        "preset_path": preset_path,
-        "wavetable_path": wt_path,
-        "sound_type": stype,
-        "confidence": round(conf * 100),
-        "note_name": note_name,
-        "fundamental_hz": round(fund, 1),
-        "envelope": {k: round(float(v), 4) for k, v in env.items()},
-        "filter": {"type": spec["filter_type"], "cutoff_hz": round(spec["cutoff_hz"]), "resonance": round(spec["resonance"], 1)},
-        "effects": {k: round(float(v), 3) if isinstance(v, (float, np.floating)) else v for k, v in fx.items()},
-        "n_harmonics": n_harm,
-        "stereo_width": round(stereo_width, 3),
-        "preset_size": len(out),
-        "time_s": round(elapsed, 2),
+        "status": "healthy",
+        "engine": "Level 2 + Feedback Loop" if (has_claude and USE_FEEDBACK_LOOP) else ("Level 2 - Claude AI" if has_claude else "Level 1 - Rules"),
+        "claude_enabled": has_claude,
+        "feedback_loop": USE_FEEDBACK_LOOP and has_claude,
+        "max_iterations": MAX_ITERATIONS,
+        "template_exists": os.path.exists(TEMPLATE_PATH),
     }
 
 
 @app.post("/api/analyze")
-async def analyze_audio(file: UploadFile = File(...)):
-    """Upload audio file → get analysis + preset."""
-    if not file.filename.lower().endswith(('.wav', '.mp3', '.flac', '.ogg', '.aiff')):
-        raise HTTPException(400, "Supported formats: WAV, MP3, FLAC, OGG, AIFF")
-
+async def analyze(file: UploadFile = File(...), sound_type: str = Form("lead")):
     job_id = str(uuid.uuid4())[:8]
-
-    with tempfile.NamedTemporaryFile(suffix=os.path.splitext(file.filename)[1], delete=False) as tmp:
-        shutil.copyfileobj(file.file, tmp)
-        tmp_path = tmp.name
-
+    tmp_dir = pathlib.Path(tempfile.mkdtemp())
+    
+    log_steps = []
+    
     try:
-        result = analyze_and_generate(tmp_path, job_id)
-        return JSONResponse(result)
+        # 1. Save upload
+        audio_path = tmp_dir / f"input{pathlib.Path(file.filename).suffix}"
+        with open(audio_path, "wb") as f:
+            shutil.copyfileobj(file.file, f)
+        
+        # 2. Deep audio analysis
+        log_steps.append({"step": "analysis", "status": "running"})
+        analysis, target_audio, target_freq = analyze_audio(str(audio_path), sound_type)
+        log_steps[-1]["status"] = "done"
+        
+        # 3. Get Claude params (or fall back to rules)
+        api_key = os.environ.get("ANTHROPIC_API_KEY")
+        claude_params = None
+        best_params = None
+        best_similarity = 0.0
+        iterations_used = 0
+        engine_used = "rules"
+        
+        if api_key:
+            try:
+                from ai_engine import analyze_with_claude
+                log_steps.append({"step": "claude_v1", "status": "running"})
+                claude_params = analyze_with_claude(analysis, sound_type)
+                log_steps[-1]["status"] = "done"
+                best_params = claude_params
+                engine_used = "claude-ai"
+                
+                # 4. Feedback loop (if enabled)
+                if USE_FEEDBACK_LOOP and target_audio is not None:
+                    try:
+                        from synth_renderer import render_preset
+                        from spectral_diff import compare_audio
+                        
+                        for iteration in range(MAX_ITERATIONS):
+                            log_steps.append({"step": f"render_v{iteration+1}", "status": "running"})
+                            rendered = render_preset(claude_params, freq=target_freq, duration=2.0)
+                            log_steps[-1]["status"] = "done"
+                            
+                            log_steps.append({"step": f"compare_v{iteration+1}", "status": "running"})
+                            # Trim target to match rendered length
+                            tgt_trimmed = target_audio[:len(rendered)] if len(target_audio) > len(rendered) else np.pad(target_audio, (0, len(rendered) - len(target_audio)))
+                            diff_text, similarity = compare_audio(tgt_trimmed, rendered)
+                            log_steps[-1]["status"] = "done"
+                            log_steps[-1]["similarity"] = round(similarity, 3)
+                            
+                            if similarity > best_similarity:
+                                best_similarity = similarity
+                                best_params = claude_params
+                            
+                            iterations_used = iteration + 1
+                            
+                            if similarity >= SIMILARITY_TARGET:
+                                break
+                            
+                            if iteration < MAX_ITERATIONS - 1 and diff_text:
+                                # Refine
+                                log_steps.append({"step": f"claude_v{iteration+2}", "status": "running"})
+                                refined = analyze_with_claude(analysis, sound_type, claude_params, diff_text)
+                                claude_params = refined
+                                log_steps[-1]["status"] = "done"
+                        
+                        engine_used = f"claude-ai+feedback ({iterations_used} iter)"
+                    except Exception as e:
+                        print(f"Feedback loop error: {e}")
+                        log_steps.append({"step": "feedback_loop", "status": "failed", "error": str(e)[:100]})
+            except Exception as e:
+                print(f"Claude failed: {e}")
+                log_steps.append({"step": "claude_v1", "status": "failed", "error": str(e)[:100]})
+        
+        # 5. Build .SerumPreset file
+        log_steps.append({"step": "build_preset", "status": "running"})
+        
+        if best_params and os.path.exists(TEMPLATE_PATH):
+            from ai_engine import build_preset_from_claude_params
+            preset_bytes, preset_name = build_preset_from_claude_params(best_params, TEMPLATE_PATH)
+        elif os.path.exists(TEMPLATE_PATH):
+            from engine_v3 import build_preset
+            preset_bytes, preset_name = build_preset(analysis, TEMPLATE_PATH)
+        else:
+            raise HTTPException(status_code=500, detail="No template found")
+        
+        log_steps[-1]["status"] = "done"
+        
+        # 6. Save preset
+        preset_path = GENERATED_DIR / f"{job_id}.SerumPreset"
+        with open(preset_path, "wb") as f:
+            f.write(preset_bytes)
+        
+        return {
+            "job_id": job_id,
+            "preset_name": preset_name,
+            "engine": engine_used,
+            "iterations": iterations_used,
+            "similarity": round(best_similarity, 3) if best_similarity > 0 else None,
+            "analysis": analysis,
+            "claude_params": best_params,
+            "has_wavetable": False,
+            "confidence": round(best_similarity, 3) if best_similarity > 0 else (0.85 if engine_used == "claude-ai" else 0.70),
+            "log": log_steps,
+        }
+        
     except Exception as e:
-        raise HTTPException(500, f"Analysis failed: {str(e)}")
+        return JSONResponse(
+            status_code=500,
+            content={"error": str(e)[:300], "log": log_steps},
+        )
     finally:
-        os.unlink(tmp_path)
+        shutil.rmtree(tmp_dir, ignore_errors=True)
 
 
 @app.get("/api/download/{job_id}")
-async def download_preset(job_id: str):
-    """Download generated .SerumPreset file."""
-    path = os.path.join(OUTPUT_DIR, f"{job_id}.SerumPreset")
-    if not os.path.exists(path):
-        raise HTTPException(404, "Preset not found")
-    return FileResponse(path, filename=f"SoundMatch_{job_id}.SerumPreset",
-                       media_type="application/octet-stream")
-
-
-@app.get("/api/download/{job_id}/wavetable")
-async def download_wavetable(job_id: str):
-    """Download extracted wavetable .wav file."""
-    path = os.path.join(OUTPUT_DIR, f"{job_id}_wavetable.wav")
-    if not os.path.exists(path):
-        raise HTTPException(404, "Wavetable not found")
-    return FileResponse(path, filename=f"SM_{job_id}.wav",
-                       media_type="audio/wav")
-
-
-@app.get("/api/health")
-async def health():
-    return {"status": "ok", "engine": "v3", "template": os.path.exists(TEMPLATE_PATH)}
+def download_preset(job_id: str):
+    preset_path = GENERATED_DIR / f"{job_id}.SerumPreset"
+    if not preset_path.exists():
+        raise HTTPException(status_code=404, detail="Preset not found or expired")
+    return FileResponse(
+        str(preset_path),
+        media_type="application/octet-stream",
+        filename=f"SoundMatch_{job_id}.SerumPreset"
+    )
