@@ -152,8 +152,23 @@ def build_preset_from_params(params: dict, template_path: str):
     for k, v in osc_a.items():
         if k.startswith("kParam") and k not in osc_params:
             osc_params[k] = float(v) if isinstance(v, (int, float)) else v
+    # FORCE ENABLE Oscillator0 (template may have it disabled)
+    osc_params["kParamEnable"] = 1.0
     if osc_params:
         set_params("Oscillator0", osc_params)
+    
+    # FORCE DISABLE Oscillator1, Oscillator2, Oscillator3 (template may have them active)
+    # but only if Claude didn't request them via oscillator_b
+    if not params.get("oscillator_b", {}).get("enabled"):
+        for osc_idx in [1, 2, 3]:
+            osc_block = preset.get(f"Oscillator{osc_idx}", {})
+            if isinstance(osc_block, dict):
+                pp = osc_block.get("plainParams", {})
+                if pp == "default": pp = {}
+                if isinstance(pp, dict):
+                    pp["kParamEnable"] = 0.0
+                    pp["kParamVolume"] = 0.0
+                    osc_block["plainParams"] = pp
     
     # WTOsc params
     wt_params = {}
@@ -187,6 +202,9 @@ def build_preset_from_params(params: dict, template_path: str):
         if "embeddedWTData" in wt_block:
             del wt_block["embeddedWTData"]
         wt_block["relativePathToWT"] = wt_path
+        # Also reset flex curve to clean state (template may have weird curve)
+        if "flex" in wt_block:
+            wt_block["flex"] = {"curveVals": [0.5, 0.5], "numPoints": 1, "xVals": [0.0, 1.0], "yVals": [1.0, 0.0]}
     
     # ── Oscillator B ──
     osc_b = params.get("oscillator_b", {})
@@ -206,7 +224,10 @@ def build_preset_from_params(params: dict, template_path: str):
     # ── Filter ──
     filt = params.get("filter", {})
     if filt.get("enabled", True):
-        filt_params = {}
+        filt_params = {
+            "kParamEnable": 1.0,      # FORCE enable
+            "kParamWet": 1.0,         # FORCE 100% wet (no dry bypass)
+        }
         # Handle generic names
         if "cutoff" in filt:
             filt_params["kParamFreq"] = float(filt["cutoff"])
@@ -240,7 +261,11 @@ def build_preset_from_params(params: dict, template_path: str):
     fx = params.get("fx", {})
     fx_list = []
     
-    # If fx is already a list (v4 direct format), use it directly
+    # ALWAYS clear template FX first - we add only what AI requested
+    if "FXRack0" in preset and isinstance(preset["FXRack0"], dict):
+        preset["FXRack0"]["FX"] = []
+    
+    # If fx is already a list (v5 direct format), use it directly
     if isinstance(fx, list):
         fx_list = fx
         preset["FXRack0"]["FX"] = fx_list
