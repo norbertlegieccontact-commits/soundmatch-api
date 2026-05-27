@@ -148,11 +148,14 @@ def health():
         "max_iterations": MAX_ITERATIONS,
         "template_exists": os.path.exists(TEMPLATE_PATH),
     }
-    @app.get("/api/test-claude")
+
+
+
+@app.get("/api/test-claude")
 def test_claude():
     api_key = os.environ.get("ANTHROPIC_API_KEY")
     if not api_key:
-        return {"error": "No API key"}
+        return {"error": "No API key set"}
     try:
         import anthropic
         client = anthropic.Anthropic(api_key=api_key)
@@ -164,7 +167,6 @@ def test_claude():
         return {"status": "ok", "response": msg.content[0].text}
     except Exception as e:
         return {"error": str(e)[:500], "type": type(e).__name__}
-
 
 @app.post("/api/analyze")
 async def analyze(file: UploadFile = File(...), sound_type: str = Form("lead")):
