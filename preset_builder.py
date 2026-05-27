@@ -157,18 +157,8 @@ def build_preset_from_params(params: dict, template_path: str):
     if osc_params:
         set_params("Oscillator0", osc_params)
     
-    # FORCE DISABLE Oscillator1, Oscillator2, Oscillator3 (template may have them active)
-    # but only if Claude didn't request them via oscillator_b
-    if not params.get("oscillator_b", {}).get("enabled"):
-        for osc_idx in [1, 2, 3]:
-            osc_block = preset.get(f"Oscillator{osc_idx}", {})
-            if isinstance(osc_block, dict):
-                pp = osc_block.get("plainParams", {})
-                if pp == "default": pp = {}
-                if isinstance(pp, dict):
-                    pp["kParamEnable"] = 0.0
-                    pp["kParamVolume"] = 0.0
-                    osc_block["plainParams"] = pp
+    # DO NOT touch Oscillator1/2/3 - they are internal Serum 2 routing slots
+    # (Noise oscillator, Sub, etc.) that need to keep template values for signal flow.
     
     # WTOsc params
     wt_params = {}
