@@ -83,6 +83,18 @@ FX_TYPES = {
 
 
 # ══════════════════════════════════════════
+# WAVEFORM → WAVETABLE POSITION MAP
+# ══════════════════════════════════════════
+
+WAVEFORM_TO_POS = {
+    "saw": 0.0,
+    "square": 64.0,
+    "triangle": 128.0,
+    "sine": 192.0,
+}
+
+
+# ══════════════════════════════════════════
 # BUILD PRESET FROM CLAUDE PARAMS
 # ══════════════════════════════════════════
 
@@ -116,8 +128,11 @@ def build_preset_from_params(params: dict, template_path: str):
     # ── Oscillator A ──
     osc_a = params.get("oscillator_a", {})
     osc_params = {}
+    # Volume (Claude may use "gain" or "volume")
     if "volume" in osc_a or "gain" in osc_a:
         osc_params["kParamVolume"] = float(osc_a.get("volume", osc_a.get("gain", 0.8)))
+    else:
+        osc_params["kParamVolume"] = 0.8  # always set a volume
     if "octave" in osc_a:
         osc_params["kParamOctave"] = float(osc_a["octave"])
     if "detune" in osc_a:
@@ -136,8 +151,12 @@ def build_preset_from_params(params: dict, template_path: str):
     
     # WTOsc params
     wt_params = {}
-    if "table_pos" in osc_a:
+    # Map waveform name to wavetable position
+    waveform = osc_a.get("waveform", "saw")
+    if "table_pos" in osc_a and float(osc_a["table_pos"]) > 0:
         wt_params["kParamTablePos"] = float(osc_a["table_pos"])
+    elif waveform in WAVEFORM_TO_POS:
+        wt_params["kParamTablePos"] = WAVEFORM_TO_POS[waveform]
     if "warp" in osc_a:
         wt_params["kParamWarp"] = float(osc_a["warp"])
     if "warp_type" in osc_a:
