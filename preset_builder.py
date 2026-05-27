@@ -146,6 +146,10 @@ def build_preset_from_params(params: dict, template_path: str):
             osc_params["kParamDetuneWid"] *= 100.0
     if "pan" in osc_a:
         osc_params["kParamPan"] = float(osc_a["pan"])
+    # Also handle direct Serum param names (from v4 engine)
+    for k, v in osc_a.items():
+        if k.startswith("kParam") and k not in osc_params:
+            osc_params[k] = float(v) if isinstance(v, (int, float)) else v
     if osc_params:
         set_params("Oscillator0", osc_params)
     
@@ -161,6 +165,11 @@ def build_preset_from_params(params: dict, template_path: str):
         wt_params["kParamWarp"] = float(osc_a["warp"])
     if "warp_type" in osc_a:
         wt_params["kParamWarpMenu"] = osc_a["warp_type"]
+    # Also handle "wt" key with direct Serum params
+    wt_direct = params.get("wt", {})
+    for k, v in wt_direct.items():
+        if k.startswith("kParam"):
+            wt_params[k] = float(v) if isinstance(v, (int, float)) else v
     if wt_params:
         wt = preset["Oscillator0"]["WTOsc0"]
         pp = wt.get("plainParams", {})
@@ -187,8 +196,13 @@ def build_preset_from_params(params: dict, template_path: str):
     filt = params.get("filter", {})
     if filt.get("enabled", True):
         filt_params = {}
+        # Handle generic names
         if "cutoff" in filt:
             filt_params["kParamFreq"] = float(filt["cutoff"])
+        # Handle direct Serum names
+        for k, v in filt.items():
+            if k.startswith("kParam"):
+                filt_params[k] = float(v) if isinstance(v, (int, float)) else v
         if "resonance" in filt:
             res = float(filt["resonance"])
             # Scale: if 0-1, convert to 0-100 range
@@ -199,17 +213,27 @@ def build_preset_from_params(params: dict, template_path: str):
             set_params("VoiceFilter0", filt_params)
     
     # ── Amp Envelope ──
-    env = params.get("envelope_amp", {})
+    env = params.get("envelope_amp", params.get("env", {}))
     env_params = {}
     for k in ["attack", "decay", "sustain", "release"]:
         if k in env:
             env_params[f"kParam{k.capitalize()}"] = float(env[k])
+    # Handle direct Serum names
+    for k, v in env.items():
+        if k.startswith("kParam"):
+            env_params[k] = float(v) if isinstance(v, (int, float)) else v
     if env_params:
         set_params("Env0", env_params)
     
     # ── FX Chain ──
     fx = params.get("fx", {})
     fx_list = []
+    
+    # If fx is already a list (v4 direct format), use it directly
+    if isinstance(fx, list):
+        fx_list = fx
+        preset["FXRack0"]["FX"] = fx_list
+        fx = {}  # skip individual FX processing below
     
     # Reverb
     reverb = fx.get("reverb", {})
